@@ -2,7 +2,7 @@
 
 Trusted-local inter-session messaging for Pi agents.
 
-Source repository: <https://github.com/Neural-Partners/np-pi/tree/main/packages/pi-yo>
+Source repository: <https://github.com/Neural-Partners/np-tooling/tree/main/packages/pi-yo>
 
 > **Status:** public npm package published as `@neuralpartners/pi-yo` (unscoped `pi-yo` is blocked by npm similarity rules).
 
@@ -38,13 +38,13 @@ Screenshots are bundled in the npm package under [`assets/`](assets/) and use ra
 
 `mailbox-only` policy holds inbound messages for manual review instead of injecting them directly into model context.
 
-![Mailbox-only review screen](https://raw.githubusercontent.com/Neural-Partners/np-pi/main/packages/pi-yo/assets/mailbox-review.png)
+![Mailbox-only review screen](https://raw.githubusercontent.com/Neural-Partners/np-tooling/main/packages/pi-yo/assets/mailbox-review.png)
 
 ### Pi to Claude Code coordination loop
 
 Pi can send to Claude Code sessions through `pi-cc-bridge`, Claude Code can reply with `pimsg --reply`, and Pi receives the reply without creating an infinite response loop.
 
-![Pi to Claude Code message flow](https://raw.githubusercontent.com/Neural-Partners/np-pi/main/packages/pi-yo/assets/pi-to-claude-code-flow.png)
+![Pi to Claude Code message flow](https://raw.githubusercontent.com/Neural-Partners/np-tooling/main/packages/pi-yo/assets/pi-to-claude-code-flow.png)
 
 ## License
 
@@ -195,7 +195,7 @@ If the source checkout is newer than npm, test from the source checkout or insta
 Safe source smoke test with a temporary `HOME` that does not touch real Pi state:
 
 ```bash
-cd /absolute/path/to/np-pi
+cd /absolute/path/to/np-tooling
 npm install
 npm run smoke:rooms --workspace @neuralpartners/pi-yo
 ```
@@ -210,8 +210,8 @@ temporary HOME: /tmp/piroom-smoke-...
 Local package install for manual testing before npm publish:
 
 ```bash
-cd /absolute/path/to/np-pi
-npm install -g /absolute/path/to/np-pi/packages/pi-yo
+cd /absolute/path/to/np-tooling
+npm install -g /absolute/path/to/np-tooling/packages/pi-yo
 pimsg doctor --sync-shims
 piroom --help
 ```
@@ -228,13 +228,13 @@ pimsg doctor --sync-shims
 ### Standalone terminal manager
 
 ```bash
-piroom join np-pi --name principal
-piroom join np-pi --name worker-auth --kind pi
-piroom post np-pi "@worker-auth please review !assign @worker-auth"
-piroom follow np-pi <thread-id-from-post-output> --name worker-auth
-piroom dnd np-pi on --name worker-auth
-piroom manager np-pi
-piroom manager np-pi --once
+piroom join np-tooling --name principal
+piroom join np-tooling --name worker-auth --kind pi
+piroom post np-tooling "@worker-auth please review !assign @worker-auth"
+piroom follow np-tooling <thread-id-from-post-output> --name worker-auth
+piroom dnd np-tooling on --name worker-auth
+piroom manager np-tooling
+piroom manager np-tooling --once
 ```
 
 `piroom post` prints the created thread id. Use that exact id for `piroom follow`; placeholder ids like `thr_abc123` are examples only.
@@ -242,15 +242,15 @@ piroom manager np-pi --once
 ### Pi command/tool surface
 
 ```txt
-/room join np-pi as principal
-/room post np-pi @worker-auth please review
-/room follow np-pi <thread-id-from-post-output>
-/room dnd np-pi on
+/room join np-tooling as principal
+/room post np-tooling @worker-auth please review
+/room follow np-tooling <thread-id-from-post-output>
+/room dnd np-tooling on
 
-join_chat_room({ "room": "np-pi", "name": "principal" })
-post_room_message({ "room": "np-pi", "message": "@worker-auth please review" })
-follow_room_thread({ "room": "np-pi", "threadId": "thr_..." })
-set_room_notifications({ "room": "np-pi", "alertMode": "mentions", "dnd": false })
+join_chat_room({ "room": "np-tooling", "name": "principal" })
+post_room_message({ "room": "np-tooling", "message": "@worker-auth please review" })
+follow_room_thread({ "room": "np-tooling", "threadId": "thr_..." })
+set_room_notifications({ "room": "np-tooling", "alertMode": "mentions", "dnd": false })
 list_chat_rooms({})
 ```
 
@@ -347,7 +347,7 @@ pi -e ./packages/pi-yo/extensions/pi-bridge.ts
 For local development of the package CLI bins (`pimsg`, `pi-cc-bridge`, `piroom`), install the package path:
 
 ```bash
-npm install -g /absolute/path/to/np-pi/packages/pi-yo
+npm install -g /absolute/path/to/np-tooling/packages/pi-yo
 pimsg doctor --sync-shims
 ```
 
@@ -389,9 +389,9 @@ pimsg --reply <target> "reply"
 pimsg doctor --fix
 pimsg doctor --sync-shims
 
-piroom join np-pi --name principal
-piroom post np-pi "@worker please review"
-piroom manager np-pi
+piroom join np-tooling --name principal
+piroom post np-tooling "@worker please review"
+piroom manager np-tooling
 
 pi-cc-bridge start
 pi-cc-bridge inbox

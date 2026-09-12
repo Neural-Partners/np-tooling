@@ -2,6 +2,8 @@
 
 This repo is public. Do not commit tokens, generated auth files, `.npmrc`, `.env`, or customer-specific package contents.
 
+Publishing rule: only public packages are registered/published to npm. Internal Neural Partners packages ship as git packages and should be installed from git URLs/tags/SHAs instead of the npm registry.
+
 ## Secret locations
 
 Existing secrets are stored in AWS SSM Parameter Store in `us-east-1`.
@@ -40,6 +42,16 @@ export GITHUB_TOKEN="$(aws ssm get-parameter \
 ```
 
 Prefer the GitHub CLI or existing SSH credentials for normal git operations. Use the PAT only when an operation explicitly requires it.
+
+## Internal git package release checklist
+
+For internal-only packages:
+
+- keep package contents out of npm publishing workflows
+- install from git URLs, tags, or SHAs
+- never include secrets, auth files, `.env`, customer data, or machine-specific runtime state
+- tag stable internal releases when agents need repeatable installs
+- document the intended Pi install command in the package README
 
 ## Manual npm publish checklist
 

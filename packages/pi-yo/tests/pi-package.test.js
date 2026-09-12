@@ -119,7 +119,7 @@ test("README and skill document local chatrooms and alert hygiene", () => {
     "Source checkout vs installed package",
     "npm latest may lag main",
     "npm run smoke:rooms --workspace @neuralpartners/pi-yo",
-    "npm install -g /absolute/path/to/np-pi/packages/pi-yo",
+    "npm install -g /absolute/path/to/np-tooling/packages/pi-yo",
     "pimsg doctor --sync-shims",
   ]) {
     assert.match(readme, new RegExp(escapeRegExp(required)));

@@ -1,4 +1,4 @@
-# np-pi
+# np-tooling
 
 Neural Partners' public home for Pi packages, extensions, skills, prompts, themes, and related tooling.
 
@@ -6,7 +6,7 @@ Neural Partners' public home for Pi packages, extensions, skills, prompts, theme
 
 - `packages/*` — public npm packages that can be installed by Pi.
 - `local/` — local experiments and personal packages; contents are gitignored except the README.
-- `private/` — Neural Partners internal or customer-specific packages; contents are gitignored except the README.
+- `private/` — Neural Partners internal or customer-specific packages; contents are gitignored except the README. Internal packages ship as git packages, not npm registry packages.
 - `docs/` — repo conventions, publishing notes, and implementation specs/plans.
 
 ## Current public packages
@@ -34,7 +34,8 @@ See [`docs/pi-packages.md`](docs/pi-packages.md).
 
 Short version:
 
-- publishable packages live under `packages/<name>/`
+- public npm packages live under `packages/<name>/`
+- internal NP packages ship as git packages, not npm registry packages
 - package manifests include the `pi-package` keyword for discoverability
 - package manifests declare Pi resources under the `pi` key when conventional directories are not enough
 - runtime dependencies live in the package that uses them

@@ -22,7 +22,7 @@
     "skills": [
       "./skills"
     ],
-    "image": "https://raw.githubusercontent.com/Neural-Partners/np-pi/main/packages/pi-yo/assets/pi-to-claude-code-flow.png"
+    "image": "https://raw.githubusercontent.com/Neural-Partners/np-tooling/main/packages/pi-yo/assets/pi-to-claude-code-flow.png"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "^0.70.0",
@@ -42,11 +42,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Neural-Partners/np-pi.git",
+    "url": "git+https://github.com/Neural-Partners/np-tooling.git",
     "directory": "packages/pi-yo"
   },
   "bugs": {
-    "url": "https://github.com/Neural-Partners/np-pi/issues"
+    "url": "https://github.com/Neural-Partners/np-tooling/issues"
   },
-  "homepage": "https://github.com/Neural-Partners/np-pi/tree/main/packages/pi-yo#readme"
+  "homepage": "https://github.com/Neural-Partners/np-tooling/tree/main/packages/pi-yo#readme"
 }

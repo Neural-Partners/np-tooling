@@ -1075,7 +1075,7 @@ export default function (pi: ExtensionAPI) {
 			"join_chat_room defaults to low-noise mention/thread/assignment alerts; do not opt into room firehose unless explicitly requested.",
 		],
 		parameters: Type.Object({
-			room: Type.String({ description: "Room name or id, e.g. np-pi." }),
+			room: Type.String({ description: "Room name or id, e.g. np-tooling." }),
 			name: Type.Optional(Type.String({ description: "Stable display name for this agent in the room." })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
