@@ -25,20 +25,22 @@
     "image": "https://raw.githubusercontent.com/Neural-Partners/np-tooling/main/packages/pi-yo/assets/pi-to-claude-code-flow.png"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "^0.70.0",
+    "@earendil-works/pi-coding-agent": "0.85.1",
     "typebox": "^1.1.0"
   },
   "scripts": {
     "test": "node --test tests/*.test.js",
     "smoke:rooms": "node scripts/smoke-rooms.js",
     "syntax": "node -c lib/pi-bridge-core.js && node -c bin/pimsg && node -c bin/pi-cc-bridge && node -c bin/piroom && tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck --strict --esModuleInterop extensions/pi-bridge.ts",
-    "verify": "npm run test && npm run syntax"
+    "verify": "npm run test && npm run syntax",
+    "smoke:pi": "node scripts/smoke-pi.mjs",
+    "check:pack": "node scripts/check-pack.mjs"
   },
   "publishConfig": {
     "access": "public"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.19.0"
   },
   "repository": {
     "type": "git",
@@ -48,5 +50,24 @@
   "bugs": {
     "url": "https://github.com/Neural-Partners/np-tooling/issues"
   },
-  "homepage": "https://github.com/Neural-Partners/np-tooling/tree/main/packages/pi-yo#readme"
+  "homepage": "https://github.com/Neural-Partners/np-tooling/tree/main/packages/pi-yo#readme",
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "extensions/",
+    "skills/",
+    "assets/",
+    "scripts/",
+    "tests/",
+    "README.md",
+    "LICENSE"
+  ]
 }

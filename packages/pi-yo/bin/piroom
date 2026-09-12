@@ -6,6 +6,7 @@
 "use strict";
 
 const path = require("node:path");
+const fs = require("node:fs");
 const core = require("../lib/pi-bridge-core.js");
 
 function die(message, code = 1) {
@@ -54,12 +55,22 @@ function sessionFor(name) {
   };
 }
 
+function agentSessionFor(name) {
+  const matches = core.activeSessions().filter((session) => {
+    if (session.name !== name || session.cwd !== process.cwd()) return false;
+    try { return fs.lstatSync(session.socketPath).isSocket(); } catch { return false; }
+  });
+  if (matches.length !== 1) throw new Error(`Agent join requires one active bridge session named ${JSON.stringify(name)} in the current cwd; found ${matches.length}`);
+  return matches[0];
+}
+
 function cmdJoin(args) {
   const room = args.shift();
   const name = takeFlag(args, "--name") || defaultName();
   const kind = takeFlag(args, "--kind") || "human";
   if (!room) die("Usage: piroom join <room> --name <name>");
-  const joined = core.joinRoom({ room, name, kind, session: sessionFor(name) });
+  const session = kind === "pi" || kind === "cc" ? agentSessionFor(name) : sessionFor(name);
+  const joined = core.joinRoom({ room, name, kind, session });
   console.log(`joined ${joined.room.roomId} as ${joined.member.displayName}`);
 }
 
@@ -72,7 +83,8 @@ async function cmdPost(args) {
   if (!room || !content) die("Usage: piroom post <room> <message...> [--name <name>] [--thread <threadId>] [--urgent]");
   const posted = core.postRoomMessage({
     room,
-    from: { name, kind: "human", session: sessionFor(name) },
+    from: { name },
+    newMemberDefaults: { kind: "human", session: sessionFor(name) },
     threadId,
     urgent,
     content,
@@ -123,7 +135,7 @@ function cmdList() {
 }
 
 function renderManager(room) {
-  process.stdout.write(core.formatRoomManagerSnapshot(room) + "\n");
+  process.stdout.write(core.terminalSafeText(core.formatRoomManagerSnapshot(room)) + "\n");
 }
 
 function cmdManager(args) {

@@ -20,7 +20,8 @@ function tempHome() {
 function runBridge(home, cwd, args) {
   return spawnSync(process.execPath, [bridge, ...args], {
     cwd,
-    env: { ...process.env, HOME: home },
+    env: { HOME: home, PATH: process.env.PATH, TMPDIR: os.tmpdir() },
+    timeout: 5000,
     encoding: "utf-8",
   });
 }
@@ -38,7 +39,15 @@ function ccMailboxFile(home, cwd) {
 async function startBridge(t, home, cwd) {
   const started = runBridge(home, cwd, ["start"]);
   assert.equal(started.status, 0, started.stderr);
-  t.after(() => runBridge(home, cwd, ["stop"]));
+  t.after(async () => {
+    const pid = core.readRegistry(core.buildPaths(home).registryFile).sessions.find(entry => entry.cwd === fs.realpathSync(cwd))?.pid;
+    runBridge(home, cwd, ["stop"]);
+    for (let attempt = 0; pid && core.isProcessAlive(pid) && attempt < 100; attempt++) await delay(20);
+    if (pid && core.isProcessAlive(pid)) {
+      try { process.kill(pid, "SIGKILL"); } catch {}
+      assert.fail(`test daemon ${pid} did not stop`);
+    }
+  });
 
   const paths = core.buildPaths(home);
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -179,4 +188,52 @@ test("pi-cc-bridge direct mailbox delivery survives retained journal failures", 
 
   const mailbox = fs.readFileSync(ccMailboxFile(home, cwd), "utf-8");
   assert.match(mailbox, /deliver despite journal failure/);
+});
+
+test("CC streaming UTF-8 and terminal-safe review preserve stored content", async (t) => {
+  const net = require("node:net");
+  const home = tempHome(), cwd = fs.mkdtempSync(path.join(os.tmpdir(), "cc-cwd-"));
+  const session = await startBridge(t, home, cwd);
+  const content = "é中😀\nnormal\ttab\x1b]52;c;bad\x07\x9b2J";
+  for (let split = 1; split < Buffer.byteLength("é中😀"); split++) {
+    const frame = Buffer.from(JSON.stringify({ id: `split-${split}`, type: "message", fromPid: 123, fromName: "sender", fromCwd: cwd, content, timestamp: Date.now() }) + "\n");
+    const start = frame.indexOf(Buffer.from("é中😀"));
+    await new Promise((resolve, reject) => {
+      const socket = net.createConnection(session.socketPath);
+      socket.setTimeout(2000, () => { socket.destroy(); reject(new Error("ACK timeout")); });
+      socket.on("error", reject);
+      socket.once("data", () => { socket.destroy(); resolve(); });
+      socket.on("connect", () => {
+        socket.write(frame.subarray(0, start + split));
+        setTimeout(() => socket.write(frame.subarray(start + split)), 10);
+      });
+    });
+  }
+  const events = core.readBridgeEvents({ eventsFile: core.buildPaths(home).eventsFile });
+  assert.equal(events.length, 8);
+  assert.ok(events.every(event => event.content === content));
+  for (const command of ["inbox", "mailbox"]) {
+    const output = runBridge(home, cwd, [command]);
+    assert.equal(output.status, 0, output.stderr);
+    assert.doesNotMatch(output.stdout, /[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+    assert.match(output.stdout, /é中😀\nnormal\ttab/);
+  }
+});
+
+test("CC failed mailbox delivery stays retryable and recipient dedupe is scoped", async (t) => {
+  const home = tempHome(), cwd = fs.mkdtempSync(path.join(os.tmpdir(), "cc-cwd-"));
+  const otherCwd = fs.mkdtempSync(path.join(os.tmpdir(), "cc-other-"));
+  const a = await startBridge(t, home, cwd), b = await startBridge(t, home, otherCwd);
+  const message = { id: "retry-after-repair", type: "message", fromPid: 123, fromName: "sender", fromCwd: cwd, content: "must arrive", timestamp: Date.now() };
+  const file = ccMailboxFile(home, cwd);
+  fs.mkdirSync(file);
+  await assert.rejects(core.sendToSocket(a.socketPath, message, { requireAck: true, ackTimeoutMs: 100 }), /ACK/);
+  assert.equal(core.readBridgeEvents({ eventsFile: core.buildPaths(home).eventsFile }).length, 0);
+  fs.rmdirSync(file);
+  for (const receiver of [a, b]) {
+    assert.equal((await core.sendToSocket(receiver.socketPath, message, { requireAck: true })).response.duplicate, false);
+    assert.equal((await core.sendToSocket(receiver.socketPath, message, { requireAck: true })).response.duplicate, true);
+  }
+  assert.match(fs.readFileSync(file, "utf8"), /must arrive/);
+  assert.match(fs.readFileSync(ccMailboxFile(home, otherCwd), "utf8"), /must arrive/);
 });

@@ -9,7 +9,7 @@
     "packages/*"
   ],
   "scripts": {
-    "verify": "npm run verify --if-present --workspaces && npm run typecheck --if-present --workspaces && npm run test --if-present --workspaces && npm run lint --if-present --workspaces && npm run format:check",
+    "verify": "npm run verify --if-present --workspaces && npm run format:check",
     "test": "npm run test --if-present --workspaces",
     "typecheck": "npm run typecheck --if-present --workspaces",
     "lint": "npm run lint --if-present --workspaces",
@@ -22,6 +22,6 @@
     "typescript": "^5.8.3"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   }
 }

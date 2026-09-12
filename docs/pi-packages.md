@@ -72,7 +72,7 @@ Common peer dependencies for Pi extension packages:
 ```json
 {
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   }
 }

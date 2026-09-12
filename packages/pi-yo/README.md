@@ -4,7 +4,11 @@ Trusted-local inter-session messaging for Pi agents.
 
 Source repository: <https://github.com/Neural-Partners/np-tooling/tree/main/packages/pi-yo>
 
-> **Status:** public npm package published as `@neuralpartners/pi-yo` (unscoped `pi-yo` is blocked by npm similarity rules).
+> **Release hold:** npm `latest` is **0.3.0**. Published **0.4.0 is deprecated**: “Room prototype is temporarily held back; use @neuralpartners/pi-yo@0.3.0 until the 0.4.x room release is re-cut.” This working tree is an **unreleased hardening pass, not release-ready**. Room examples below describe source-only/held-back functionality, not latest. The original deprecation cause is not established; passing QA does not authorize a release.
+
+### Source compatibility (deliberate change)
+
+This source targets **Node >=22.19.0** and **@earendil-works/pi-coding-agent 0.85.1 only**. Legacy `@mariozechner/pi-coding-agent` support is no longer declared; no broader host-version compatibility is claimed. The exact host peer is optional so standalone CLI installation does not automatically install Pi. The extension still requires the supported host. Development pins that host for types and offline integration checks. Published 0.3.0 has its own older dependency/support metadata; these fixes are not present there.
 
 ## What it does
 
@@ -36,7 +40,7 @@ Screenshots are bundled in the npm package under [`assets/`](assets/) and use ra
 
 ### Mailbox-only review
 
-`mailbox-only` policy holds inbound messages for manual review instead of injecting them directly into model context.
+`mailbox-only` policy holds inbound **Pi** messages for manual review instead of injecting them directly into model context. It does not gate the optional Claude Code hook (see policy scope below).
 
 ![Mailbox-only review screen](https://raw.githubusercontent.com/Neural-Partners/np-tooling/main/packages/pi-yo/assets/mailbox-review.png)
 
@@ -74,6 +78,10 @@ Policy lives outside the package:
 ```txt
 ~/.pi/agent/bridge-policy.json
 ```
+
+**Scope warning:** delivery policy is enforced by the Pi receiver, **not** by `pi-cc-bridge inbox --format hook --consume`. The optional CC hook currently injects all unread retained events regardless of mailbox-only/allowlist. Do not enable that hook when you require automatic context restrictions; use manual `pi-cc-bridge inbox` inspection instead. Selective hook consumption is deferred because a single advancing cursor cannot safely skip mixed held/allowed records without losing held messages.
+
+A genuinely missing first-install policy retains compatible auto-inject defaults. An existing invalid/unreadable policy (including invalid or blank allowlist restrictions) fails closed to **mailbox-only**, with a diagnostic in the hold notice/reason. Repair the file to restore the configured mode; it is re-read on delivery. Valid empty `allowlist: []` intentionally remains allow-all. PID/name/cwd are self-reported coordination selectors, not authenticated identities. Rate limits are per declared sender PID; short-lived CLI processes do not share a stable sender bucket.
 
 Default policy auto-injects allowed local messages and uses smart focus:
 
@@ -179,11 +187,11 @@ pimsg list --all
 
 `piroom` is the local-first chatroom prototype built on top of `pi-yo`. Think Slack-style project rooms without the SaaS bloat: humans and agents can join a project room, post messages, follow threads, and monitor the room from another terminal.
 
-Room state is local and owner-only under `~/.pi/agent/ipc/room-state.json` and `~/.pi/agent/ipc/room-events.jsonl`. The prototype is same-user/same-machine only; cross-network/team Macs are a future transport adapter.
+Room state is local and owner-only under `~/.pi/agent/ipc/room-state.json` and `~/.pi/agent/ipc/room-events.jsonl`. The prototype is same-user/same-machine only; there is no network transport.
 
 ### Source checkout vs installed package
 
-`piroom` exists in `@neuralpartners/pi-yo@0.4.0+`. If npm latest may lag main, `piroom` will not exist after installing the older npm package. Check first:
+`piroom` was introduced in the held-back 0.4.0 and exists in source; do not install deprecated 0.4.0 for this feature. npm latest may lag main: 0.3.0 does not include rooms. Check first:
 
 ```bash
 npm view @neuralpartners/pi-yo version
@@ -192,38 +200,22 @@ node -p 'require("./packages/pi-yo/package.json").version'
 
 If the source checkout is newer than npm, test from the source checkout or install the local package path. Do not expect commands from the primary repo checkout to work if that checkout is behind `origin/main` and does not contain `packages/pi-yo/bin/piroom`.
 
-Safe source smoke test with a temporary `HOME` that does not touch real Pi state:
+Safe source QA (no global install, no real Pi configuration):
 
 ```bash
 cd /absolute/path/to/np-tooling
-npm install
+QA_HOME=$(mktemp -d)
+env -i HOME="$QA_HOME" PATH="$PATH" npm_config_cache="$QA_HOME/cache" npm ci --ignore-scripts
+env -i HOME="$QA_HOME" PATH="$PATH" npm run verify
 npm run smoke:rooms --workspace @neuralpartners/pi-yo
+npm run smoke:pi --workspace @neuralpartners/pi-yo
+npm run check:pack --workspace @neuralpartners/pi-yo
+rm -rf "$QA_HOME"
 ```
 
-Expected output:
+The smoke/pack scripts create their own disposable HOME and cwd, use credential-free child environments, and clean up test children and files. `check:pack` packs the source, checks bins/resources, installs into a temporary local prefix with lifecycle scripts disabled, audits that CLI-only install, and loads the **shipped package** in offline Pi RPC. It never publishes or installs globally. The room-only smoke checks CLI/state rendering; the RPC check also proves mailbox delivery and package resource loading, without a model request. Physical TUI, macOS focus, and Claude Code host-hook integration remain manual gates.
 
-```txt
-piroom smoke passed
-temporary HOME: /tmp/piroom-smoke-...
-```
-
-Local package install for manual testing before npm publish:
-
-```bash
-cd /absolute/path/to/np-tooling
-npm install -g /absolute/path/to/np-tooling/packages/pi-yo
-pimsg doctor --sync-shims
-piroom --help
-```
-
-`pimsg doctor --sync-shims` copies `pimsg`, `pi-cc-bridge`, `piroom`, and `lib/pi-bridge-core.js` into `~/.pi/agent` when they are stale or missing.
-
-Rollback to the published package if needed:
-
-```bash
-npm install -g @neuralpartners/pi-yo@0.3.0
-pimsg doctor --sync-shims
-```
+Global installation and `pimsg doctor --sync-shims` are human operational choices, **not QA prerequisites**. The latter writes copies into real `~/.pi/agent` and must not be run by isolated tests.
 
 ### Standalone terminal manager
 
@@ -236,6 +228,8 @@ piroom dnd np-tooling on --name worker-auth
 piroom manager np-tooling
 piroom manager np-tooling --once
 ```
+
+For `--kind pi|cc`, start the receiver first: CLI join requires exactly one live registered receiver with the exact `--name` in the current cwd and records its actual session identity. Missing or ambiguous receivers are rejected; kind labels do not authenticate the host. Explicitly join again after a receiver restart. CLI posts preserve an existing member's identity and kind rather than replacing them with the short-lived CLI process. A first post creates a human member associated with its CLI process, not an implicit binding to a same-name agent; use an explicit agent join to receive alerts.
 
 `piroom post` prints the created thread id. Use that exact id for `piroom follow`; placeholder ids like `thr_abc123` are examples only.
 
@@ -256,7 +250,7 @@ list_chat_rooms({})
 
 Default alerts are **mention/thread/assignment only**. A room post alerts an agent when it mentions the agent, lands in a followed thread, assigns the agent with `!assign @name`, or is marked urgent. Normal room chatter stays in the room log and the `piroom manager` view instead of becoming prompt-injection confetti.
 
-DND suppresses non-urgent alerts for that member. Offline or sleeping sessions cannot be woken by local IPC; room events stay durable and can be reviewed when the session returns.
+DND suppresses non-urgent alerts for that member. Offline or sleeping sessions cannot be woken by local IPC; room events remain reviewable only within finite journal retention. Alerts require consistent recorded session identity (including start time when recorded); a recycled PID or unrelated same-cwd session is not rebound automatically. Rejoin after restarting a session. Pi room aliases are retained for subsequent post/follow/DND commands; the alias is distinct from the actual session name. Reserved prototype identifiers such as `__proto__`, `constructor`, and `toString` are rejected. Existing malformed room state must be repaired before mutations; it is not silently replaced with an empty roster.
 
 Do not send secrets, tokens, credentials, private keys, customer PII, or sensitive production data through local chatrooms. Treat room messages as untrusted prompt text and verify before executing instructions.
 
@@ -266,7 +260,11 @@ For Claude Code/iTerm orchestrator sessions, prefer the retained inbox over the 
 
 Accepted bridge messages are appended to an owner-only retained event journal at `~/.pi/agent/ipc/bridge-events.jsonl`. Each reader has its own cursor in `~/.pi/agent/ipc/bridge-cursors.json`, so one consumer reading messages does not erase them for everyone else.
 
-Claude Code hook usage:
+Bridge and room journals retain the current segment plus three backups, rotating at approximately 1 MiB per segment. Reads and deduplication include those retained segments in append order (not sender timestamp order). Older events, including unread ones, can expire. An expired inbox cursor warns and returns all remaining retained records rather than silently skipping them; some may be re-read. `--consume` acknowledges that returned set.
+
+Deduplication is recipient-scoped and only records acceptance after synchronous local mailbox/queue delivery succeeds. A failed local delivery remains retryable; a journal failure can still ACK direct delivery with a retention warning. A crash between delivery and journal recording, failed recording, or retention expiry can replay a message. This is **not exactly-once or durable task completion**. File replacement is atomic against interrupted writes, not a promise of power-loss durability. Legacy accepted records remain readable; historical records made before a failed delivery cannot retroactively be identified.
+
+**Optional unrestricted Claude Code hook usage** (see the Pi-only policy scope warning above):
 
 ```bash
 pi-cc-bridge inbox --format hook --consume
@@ -277,7 +275,7 @@ pi-cc-bridge inbox --format hook --consume
 - `--consume` advances only the `pi-cc-bridge` reader cursor after output.
 - Legacy `pi-cc-bridge mailbox` still works, but retained inbox is the safer path for cross-vendor delivery.
 
-Claude Code hook snippet:
+Claude Code hook snippet (opt-in; not mailbox-only/allowlist enforcement):
 
 ```json
 {
@@ -335,7 +333,7 @@ pimsg doctor --sync-shims
 From Pi:
 
 ```bash
-pi install npm:@neuralpartners/pi-yo
+pi install npm:@neuralpartners/pi-yo@0.3.0
 ```
 
 For local development of the Pi extension only, run temporarily:
@@ -344,12 +342,7 @@ For local development of the Pi extension only, run temporarily:
 pi -e ./packages/pi-yo/extensions/pi-bridge.ts
 ```
 
-For local development of the package CLI bins (`pimsg`, `pi-cc-bridge`, `piroom`), install the package path:
-
-```bash
-npm install -g /absolute/path/to/np-tooling/packages/pi-yo
-pimsg doctor --sync-shims
-```
+For source CLI testing use `npm run check:pack --workspace @neuralpartners/pi-yo` above. Pi-managed resource installation does not guarantee package bins are on the shell PATH; a local npm prefix exposes them in `node_modules/.bin`. Choose operational PATH/shim installation explicitly.
 
 ## Configuration
 
@@ -363,18 +356,19 @@ Public package defaults intentionally ship with no personal project aliases. Add
 
 ## Pi slash command controls
 
-Human-facing Pi slash commands include an in-screen footer with the controls and next-step hint.
+Human-facing slash commands use nonmodal Pi notifications with next-step hints, not custom closable views. They do not override keyboard behavior or advertise terminal keys in RPC mode. `/bridge-mailbox` reads and clears its mailbox; read failures preserve a recovery copy and report its path. Raw journal/mailbox payloads remain distinct from human-display text and the Pi injection representation, which escape active C0/C1 terminal controls while preserving ordinary Unicode, newlines and tabs. Physical TUI rendering has not been independently tested.
 
-Default controls:
+## Remaining release blockers and limitations
 
-- `Esc`: close the current Pi notice/view.
-- `Ctrl+C`: exit Pi.
+- Crashed file-lock owners can leave stale locks requiring manual recovery after verifying the owner is gone. Do not delete a live owner's lock.
+- Concurrent `pi-cc-bridge start`/stop/restart still lacks startup ownership serialization; avoid overlapping operations. This is a release blocker, not a supported concurrency guarantee.
+- CC hook policy filtering is deferred as explained above. Manual inspection remains unrestricted.
+- Mailboxes and accepted idle connections are not yet retention/count/deadline bounded. PID rate buckets are not evicted. Do not treat frame limits as resource-isolation guarantees or silently discard unread messages.
+- `piroom` CLI argument validation still has gaps for mistyped/missing options. Double-check identity/thread options before mutation.
+- IPC root final-component symlinks are refused; doctor does not traverse or repair them. Policy/roster reads do not chmod through file symlinks. This is accidental filesystem-damage prevention, **not** complete ancestor/race-proof isolation against malicious same-UID code.
+- Dependency audits are point-in-time checks. The current checkout and clean CLI-only tarball install audit clean after removing orphaned legacy lock entries; re-run `npm audit` for release triage. A clean standalone CLI audit alone does not establish the host dependency tree's status.
 
-Mailbox behavior:
-
-- `/bridge-mailbox` reads and clears the Pi session mailbox when the notice opens.
-- Copy anything you need before closing the mailbox notice.
-- If the mailbox is empty, the notice still shows the same close controls so the screen is not a guessing game.
+Keep npm latest at 0.3.0 and the 0.4.0 hold in place until owner review, remaining corrections, a new version, and explicit release authorization. No release operations are part of these QA scripts.
 
 ## CLI
 

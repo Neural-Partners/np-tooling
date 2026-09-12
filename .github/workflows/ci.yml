@@ -10,8 +10,13 @@ on:
 
 jobs:
   verify:
-    name: Verify
-    runs-on: ubuntu-latest
+    name: Verify (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22.19.0, 22]
 
     steps:
       - name: Check out repository
@@ -20,11 +25,40 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Create disposable QA home
+        run: echo "QA_HOME=$(mktemp -d)" >> "$GITHUB_ENV"
 
-      - name: Verify workspace
-        run: npm run verify
+      - name: Install dependencies without lifecycle scripts
+        run: env -i HOME="$QA_HOME" PATH="$PATH" npm_config_cache="$QA_HOME/cache" npm ci --ignore-scripts
+
+      - name: Verify workspace once
+        run: env -i HOME="$QA_HOME" PATH="$PATH" npm run verify
+
+      - name: Isolated room and current Pi smoke
+        run: |
+          env -i HOME="$QA_HOME" PATH="$PATH" npm run smoke:rooms --workspace @neuralpartners/pi-yo
+          env -i HOME="$QA_HOME" PATH="$PATH" npm run smoke:pi --workspace @neuralpartners/pi-yo
+
+      - name: Pack, inspect, install and exercise shipped package
+        shell: bash
+        run: env -i HOME="$QA_HOME" PATH="$PATH" npm run check:pack --workspace @neuralpartners/pi-yo | tee "$RUNNER_TEMP/pi-yo-pack.log"
+
+      - name: Record dependency audit for release triage
+        continue-on-error: true
+        run: env -i HOME="$QA_HOME" PATH="$PATH" npm_config_cache="$QA_HOME/cache" npm audit --json > "$RUNNER_TEMP/pi-yo-audit.json"
+
+      - name: Retain package and audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi-yo-qa-${{ matrix.os }}-${{ matrix.node }}
+          path: |
+            ${{ runner.temp }}/pi-yo-pack.log
+            ${{ runner.temp }}/pi-yo-audit.json
+
+      - name: Remove disposable QA home
+        if: always()
+        run: test -z "$QA_HOME" || rm -rf "$QA_HOME"

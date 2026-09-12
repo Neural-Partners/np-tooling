@@ -914,29 +914,27 @@ test("doctorIpcPermissions reports bridge-owned ipc symlink entries", () => {
   assert.equal(result.findings.some((finding) => finding.path === link && finding.issue === "symbolic-link"), true);
 });
 
-test("formatNoticeWithControls appends an explicit dismiss footer", () => {
+test("formatNoticeWithControls keeps actions without invented modal controls", () => {
   const notice = core.formatNoticeWithControls("Active Pi sessions:\n  • backend", {
     action: "Use /bridge-send <target> <message> to send a message.",
   });
 
   assert.match(notice, /Active Pi sessions/);
   assert.match(notice, /Use \/bridge-send <target> <message>/);
-  assert.match(notice, /Controls:/);
-  assert.match(notice, /Esc/i);
-  assert.match(notice, /close/i);
+  assert.doesNotMatch(notice, /Controls:|Esc|Ctrl\+C/);
   assert.equal(notice.endsWith("\n"), false);
 });
 
-test("formatMailboxNotice explains close controls and mailbox clearing", () => {
+test("formatMailboxNotice explains mailbox clearing without modal controls", () => {
   const notice = core.formatMailboxNotice("---\nmessage body\n---");
 
   assert.match(notice, /message body/);
-  assert.match(notice, /Mailbox was cleared when this notice opened/);
-  assert.match(notice, /Esc/i);
+  assert.match(notice, /Mailbox was cleared after reading/);
+  assert.doesNotMatch(notice, /Esc|Ctrl\+C/);
 
   const empty = core.formatMailboxNotice("");
   assert.match(empty, /Bridge mailbox is empty/);
-  assert.match(empty, /Controls:/);
+  assert.doesNotMatch(empty, /Controls:/);
 });
 
 test("room helpers normalize ids and register stable members", () => {
@@ -1157,7 +1155,7 @@ test("deliverRoomAlerts sends only selected recipients through bridge sockets", 
   assert.equal(result.skipped.length, 0);
 });
 
-test("deliverRoomAlerts refuses ambiguous same-cwd fallback", async () => {
+test("deliverRoomAlerts refuses stale PID rebinding and same-cwd fallback", async () => {
   const state = {
     schemaVersion: 1,
     rooms: {
@@ -1211,8 +1209,8 @@ test("deliverRoomAlerts refuses ambiguous same-cwd fallback", async () => {
     },
   });
 
-  assert.deepEqual(sent.map((item) => item.socketPath), ["/tmp/222.sock"]);
-  assert.equal(named.deliveries.length, 1);
+  assert.deepEqual(sent, []);
+  assert.equal(named.deliveries.length, 0);
 });
 
 test("piroom join post and manager --once render a local room", () => {

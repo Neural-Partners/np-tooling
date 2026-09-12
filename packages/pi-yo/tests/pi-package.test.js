@@ -119,7 +119,7 @@ test("README and skill document local chatrooms and alert hygiene", () => {
     "Source checkout vs installed package",
     "npm latest may lag main",
     "npm run smoke:rooms --workspace @neuralpartners/pi-yo",
-    "npm install -g /absolute/path/to/np-tooling/packages/pi-yo",
+    "npm run check:pack --workspace @neuralpartners/pi-yo",
     "pimsg doctor --sync-shims",
   ]) {
     assert.match(readme, new RegExp(escapeRegExp(required)));
@@ -197,9 +197,9 @@ test("receivers record accepted messages and extension send paths ensure ids", (
   const ccBridge = fs.readFileSync(path.join(packageRoot, "bin", "pi-cc-bridge"), "utf-8");
   const extension = fs.readFileSync(path.join(packageRoot, "extensions", "pi-bridge.ts"), "utf-8");
 
-  assert.match(ccBridge, /safeRecordAcceptedBridgeMessage/);
+  assert.match(ccBridge, /acceptBridgeMessage/);
   assert.match(ccBridge, /sessionReaderKey/);
-  assert.match(extension, /safeRecordAcceptedBridgeMessage/);
+  assert.match(extension, /acceptBridgeMessage/);
   assert.match(extension, /ensureMessageId/);
   assert.match(extension, /readerKey: bridgeCore\.sessionReaderKey/);
 });
@@ -219,11 +219,34 @@ test("receivers suppress duplicate raw delivery and tolerate journal failures", 
   const extension = fs.readFileSync(path.join(packageRoot, "extensions", "pi-bridge.ts"), "utf-8");
   const ccBridge = fs.readFileSync(path.join(packageRoot, "bin", "pi-cc-bridge"), "utf-8");
 
-  assert.match(extension, /recordAcceptedMessageSafe/);
+  assert.match(extension, /acceptMessage/);
   assert.match(extension, /recorded\?\.duplicate/);
   assert.match(extension, /Duplicate inter-session message/);
   assert.match(extension, /recordingError/);
-  assert.match(ccBridge, /recordAcceptedMessageSafe/);
+  assert.match(ccBridge, /acceptMessage/);
   assert.match(ccBridge, /appendDuplicateToMailbox/);
   assert.match(ccBridge, /journalRecorded/);
+});
+
+test("CI pack gate propagates pipeline failure and retains its log", (t) => {
+  const { spawnSync } = require("node:child_process");
+  const os = require("node:os");
+  const workflowPath = path.resolve(packageRoot, "../../.github/workflows/ci.yml");
+  if (!fs.existsSync(workflowPath)) return t.skip("Repository-only CI workflow is not shipped in the package");
+  const workflow = fs.readFileSync(workflowPath, "utf8");
+  const step = workflow.split("- name: Pack, inspect, install and exercise shipped package\n")[1]?.split("\n      - name:")[0];
+  assert.ok(step, "pack gate must exist");
+  assert.match(step, /^        shell: bash\n/);
+  const command = step.match(/\n        run: (.+)/)?.[1];
+  assert.ok(command);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yo-ci-gate-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, "bin"); fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "npm"), '#!/bin/sh\necho "deliberate package gate failure"\nexit 42\n', { mode: 0o700 });
+  // GitHub Actions uses these flags for explicit shell: bash, unlike its default bash -e.
+  const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command], {
+    env: { HOME: dir, QA_HOME: dir, RUNNER_TEMP: dir, PI_CODING_AGENT_DIR: path.join(dir, "agent"), PATH: `${bin}:${process.env.PATH}` }, encoding: "utf8", timeout: 3000,
+  });
+  assert.equal(result.status, 42, result.stderr);
+  assert.match(fs.readFileSync(path.join(dir, "pi-yo-pack.log"), "utf8"), /deliberate package gate failure/);
 });

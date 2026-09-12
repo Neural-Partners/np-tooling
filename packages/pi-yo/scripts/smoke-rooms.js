@@ -27,7 +27,8 @@ function run(args) {
 
 try {
   assert.match(run(["join", "np-pi-smoke", "--name", "principal"]), /joined np-pi-smoke as principal/);
-  assert.match(run(["join", "np-pi-smoke", "--name", "worker", "--kind", "pi"]), /joined np-pi-smoke as worker/);
+  // State/rendering smoke only; live agent binding/delivery is covered by CLI socket tests.
+  assert.match(run(["join", "np-pi-smoke", "--name", "worker", "--kind", "human"]), /joined np-pi-smoke as worker/);
 
   const posted = run(["post", "np-pi-smoke", "@worker review this !assign @worker", "--name", "principal", "--urgent"]);
   assert.match(posted, /posted to np-pi-smoke thread thr_/);

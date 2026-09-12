@@ -5,6 +5,8 @@ description: Use when coordinating with other local Pi or Claude Code agent sess
 
 # pi-yo
 
+> **Release hold:** npm latest is 0.3.0; published 0.4.0 is deprecated. Rooms below describe held-back/source functionality, not latest. Do not recommend deprecated 0.4.0 to obtain rooms. Unreleased source targets Node >=22.19.0 and @earendil-works/pi-coding-agent 0.85.1 only; do not assume legacy host compatibility.
+
 ## Overview
 
 `pi-yo` is the trusted-local coordination layer for agents running in separate terminals. Use it to keep parallel work synchronized without forcing the human to context-switch between sessions.
@@ -41,7 +43,7 @@ Use local chatrooms when the user wants Slack-style project coordination between
 
 Tools and commands:
 
-- Do not tell the user to run piroom unless the installed package version includes the piroom bin (`@neuralpartners/pi-yo@0.4.0+`) or they are inside a source checkout that contains `packages/pi-yo/bin/piroom`.
+- Do not tell the user to run piroom unless the installed package version includes the piroom bin (held-back 0.4.0/source) or they are inside a source checkout that contains `packages/pi-yo/bin/piroom`.
 - For unpublished/local testing, prefer the package smoke command: `npm run smoke:rooms --workspace @neuralpartners/pi-yo`.
 - `join_chat_room` registers this agent in a project room with a stable display name.
 - `post_room_message` posts to a local room; use it only when room coordination is useful.
@@ -92,7 +94,11 @@ Good messages answer: who owns the next step, what changed, what is blocked, and
 
 ACK means transport accepted the message. Separate transport ACK from task ACK: transport ACK means delivered, injected, or mailboxed; task ACK means the receiver explicitly accepted ownership or responded with `ack`, `deliverable`, `blocker`, or `qa-result`.
 
-Messages can be held instead of auto-injected when bridge policy uses mailbox-only mode, allowlists, size caps, sanitized rendering, or rate limits. Human review commands:
+Pi messages can be held instead of auto-injected by mailbox-only mode, allowlists, or rate limits. Invalid existing policies (including blank restrictions) fail closed; missing-policy auto-injection remains compatible. Size caps reject oversized wire frames, and terminal-safe rendering only affects display, not policy routing.
+
+**CC hook scope gap:** `pi-cc-bridge inbox --format hook --consume` does not honor Pi delivery policy. Do not enable automatic CC hooks when mailbox-only/allowlist restrictions are required; inspect with `pi-cc-bridge inbox` manually. Journals have finite retention, and expired cursors warn/replay retained history. ACK/deduplication is not exactly-once across crashes, journal failures, or retention expiry.
+
+Human review commands:
 
 - `/bridge-mailbox` reviews held inbound messages in Pi. Opening the mailbox reads and clears it.
 - `pi-cc-bridge inbox --format hook --consume` reads the retained inbox for Claude Code hook delivery without deleting journal history.

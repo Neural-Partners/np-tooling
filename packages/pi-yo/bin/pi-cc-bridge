@@ -86,8 +86,8 @@ function writeSocketResponse(socket, response) {
   }
 }
 
-function recordAcceptedMessageSafe(msg) {
-  return core.safeRecordAcceptedBridgeMessage({
+function acceptMessage(msg, deliver) {
+  return core.acceptBridgeMessage({
     message: msg,
     to: {
       pid: process.pid,
@@ -95,7 +95,7 @@ function recordAcceptedMessageSafe(msg) {
       cwd,
       readerKey: READER_KEY,
     },
-  });
+  }, deliver);
 }
 
 function journalReceiptMetadata(recording) {
@@ -139,10 +139,10 @@ function cmdMailbox() {
     if (!content) {
       console.log("(no new messages)");
     } else {
-      console.log(content);
+      console.log(core.terminalSafeText(content));
     }
-  } catch {
-    console.log("(no new messages)");
+  } catch (err) {
+    die(core.terminalSafeText(`Failed to read mailbox: ${err.message}`));
   }
 }
 
@@ -157,12 +157,14 @@ function cmdInbox(args = []) {
     all,
   });
 
+  if (inbox.cursorExpired) process.stderr.write("Warning: inbox cursor expired from retained history; showing all retained events (some may have been read).\n");
+
   if (format === "hook") {
     const payload = core.formatInboxHookPayload(inbox.events);
     if (payload) process.stdout.write(payload + "\n");
   } else {
     const formatted = core.formatInboxEvents(inbox.events).trim();
-    console.log(formatted || "(no new messages)");
+    console.log(core.terminalSafeText(formatted || "(no new messages)"));
   }
 
   if (consume && inbox.events.length > 0) {
@@ -213,7 +215,7 @@ function appendToMailbox(msg) {
   // For replies, omit the hint — the exchange is complete, no further reply expected.
   const replyHint = isReply
     ? `_This is a reply — no further reply needed._`
-    : `_Reply with: pimsg --reply "${msg.fromName}" <your reply>_`;
+    : `_Reply with: pimsg --reply ${core.shellQuote(msg.fromName)} <your reply>_`;
 
   const entry = [
     `---`,
@@ -239,13 +241,7 @@ function runDaemon() {
   let heartbeatTimer;
   function touchHeartbeat() {
     try {
-      const registry = core.readRegistry(REGISTRY_FILE);
-      const entry = registry.sessions.find((session) => session.pid === process.pid);
-      if (entry) {
-        entry.lastHeartbeatAt = Date.now();
-        entry.readerKey = READER_KEY;
-        core.writeRegistry(registry, REGISTRY_FILE);
-      }
+      core.updateRegisteredSession(process.pid, { lastHeartbeatAt: Date.now(), readerKey: READER_KEY }, REGISTRY_FILE);
       core.updateSessionStatus({
         pid: process.pid,
         name,
@@ -256,9 +252,10 @@ function runDaemon() {
   }
 
   const server = net.createServer((socket) => {
+    socket.setEncoding("utf8");
     let buffer = "";
     socket.on("data", (chunk) => {
-      const collected = core.collectJsonLines(buffer, chunk.toString("utf-8"));
+      const collected = core.collectJsonLines(buffer, chunk);
       if (collected.overflow) {
         socket.destroy();
         return;
@@ -273,13 +270,10 @@ function runDaemon() {
           if (!validation.ok) continue;
           const msg = validation.value;
           if (msg.type === "message") {
-            const recording = recordAcceptedMessageSafe(msg);
-            const recorded = recording.recorded;
-            if (recorded?.duplicate) {
-              appendDuplicateToMailbox(msg, recorded);
-            } else {
-              appendToMailbox(msg);
-            }
+            const recording = acceptMessage(msg, (recorded) => {
+              if (recorded?.duplicate) appendDuplicateToMailbox(msg, recorded);
+              else appendToMailbox(msg);
+            });
             writeSocketResponse(socket, socketResponse("ack", msg, journalReceiptMetadata(recording)));
           } else if (msg.type === "ping") {
             writeSocketResponse(socket, socketResponse("pong", msg));
