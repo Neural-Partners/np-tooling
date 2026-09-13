@@ -5,6 +5,8 @@ description: Use when coordinating with other local Pi or Claude Code agent sess
 
 # pi-yo
 
+> **Release hold:** npm latest is 0.3.0; published 0.4.0 is deprecated. Rooms below describe held-back/source functionality, not latest. Do not recommend deprecated 0.4.0 to obtain rooms. Unreleased source targets Node >=22.19.0 and @earendil-works/pi-coding-agent 0.85.1 only; do not assume legacy host compatibility.
+
 ## Overview
 
 `pi-yo` is the trusted-local coordination layer for agents running in separate terminals. Use it to keep parallel work synchronized without forcing the human to context-switch between sessions.
@@ -41,7 +43,7 @@ Use local chatrooms when the user wants Slack-style project coordination between
 
 Tools and commands:
 
-- Do not tell the user to run piroom unless the installed package version includes the piroom bin (`@neuralpartners/pi-yo@0.4.0+`) or they are inside a source checkout that contains `packages/pi-yo/bin/piroom`.
+- Do not tell the user to run piroom unless the installed package version includes the piroom bin (held-back 0.4.0/source) or they are inside a source checkout that contains `packages/pi-yo/bin/piroom`.
 - For unpublished/local testing, prefer the package smoke command: `npm run smoke:rooms --workspace @neuralpartners/pi-yo`.
 - `join_chat_room` registers this agent in a project room with a stable display name.
 - `post_room_message` posts to a local room; use it only when room coordination is useful.
@@ -92,11 +94,17 @@ Good messages answer: who owns the next step, what changed, what is blocked, and
 
 ACK means transport accepted the message. Separate transport ACK from task ACK: transport ACK means delivered, injected, or mailboxed; task ACK means the receiver explicitly accepted ownership or responded with `ack`, `deliverable`, `blocker`, or `qa-result`.
 
-Messages can be held instead of auto-injected when bridge policy uses mailbox-only mode, allowlists, size caps, sanitized rendering, or rate limits. Human review commands:
+Mailbox-only/allowlist/rate policies can hold Pi and hook messages. Invalid existing policies fail closed; missing policies default to auto-inject. Wire caps reject oversized frames; terminal-safe rendering changes display, not stored payloads.
 
-- `/bridge-mailbox` reviews held inbound messages in Pi. Opening the mailbox reads and clears it.
+**CC hooks are opt-in and policy-controlled.** Hook `--consume` advances a separate scan watermark, never manual unread visibility. Text `inbox --consume` suppresses future hook delivery. Scanned held originals stay manual-only after policy repair; duplicate receipts never inject. Batches scan64 records/emit64 originals/64KiB serialized output. Oversized originals stay pending for manual inspection/consumption. Non-consuming outputs spend persisted quota without moving cursors. Malformed state fails closed; read-only `inbox --all` permits inspection. Retention expiry warns/replays; output/ACK is not exactly-once or proof of ingestion.
+
+Mailboxes reject entries beyond1MiB; negative ACK means failure and sender retry after manual drain. Upgrade both peers: old clients ignore rejection. Overflow is visible in status/mailbox review; one recovery preserves failed output. Receivers bound sockets32/idle2s/lifetime5s and1024 fixed-window PID buckets. Limit edits preserve usage; Pi quotas reset on restart, hook quotas persist. See README for migration, resource envelopes and crash limits.
+
+Human review commands:
+
+- `/bridge-mailbox` reviews held inbound messages in Pi. Successful local notification handoff clears it; output errors preserve recovery.
 - `pi-cc-bridge inbox --format hook --consume` reads the retained inbox for Claude Code hook delivery without deleting journal history.
-- `pi-cc-bridge mailbox` prints held Claude Code bridge messages; this legacy path is read-and-clear.
+- `pi-cc-bridge mailbox` prints held Claude Code bridge messages; successful local output clears its single recovery snapshot; failure preserves it.
 
 If a message is urgent and no response comes back, ask the user before escalating or retrying repeatedly.
 
@@ -133,17 +141,12 @@ When the human asks for manual coordination, reference these commands:
 
 ## Quick Reference
 
-- Discover peers: `list_sessions`
-- Update current work state: `update_session_status`
-- Check a peer before dispatch: `pimsg state <target>` or `pimsg list --with-status`
-- Claude Code retained inbox: `pi-cc-bridge inbox --format hook --consume`
-- Hide/reveal this Pi session: `set_session_visibility`
 - Join a local room: `join_chat_room`
 - Post to a local room: `post_room_message`
 - Follow a local room thread: `follow_room_thread`
 - New handoff/FYI/request: `send_to_session`
 - Response to inbound message: `reply_to_session`
 - Invisible sessions: hidden from normal discovery/name/cwd/fuzzy targeting; Exact PID still works
-- Duplicate target warning: use exact PID, cwd, or role alias
-- Receipt language: "delivered/ACKed" only means transport accepted it
 - Coordination envelope: include `runId`, `msgId`, `replyTo`, roles, type, status, paths, summary, blockers, and reply expectation
+
+For hyphen-leading room text use `piroom post project --name worker -- "- first point" "--urgent"`; everything after `--` is literal text. Invalid/duplicate/unknown options fail before mutation; omitted defaults are unchanged.

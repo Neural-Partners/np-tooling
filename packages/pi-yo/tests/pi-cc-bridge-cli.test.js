@@ -13,14 +13,20 @@ const { setTimeout: delay } = require("node:timers/promises");
 const core = require("../lib/pi-bridge-core.js");
 const bridge = path.resolve(__dirname, "..", "bin", "pi-cc-bridge");
 
-function tempHome() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "pi-cc-home-"));
+const temporaryPaths = [];
+test.after(() => { for (const dir of temporaryPaths) fs.rmSync(dir, { recursive: true, force: true }); });
+function tempDir(prefix) {
+  const dir = fs.mkdtempSync(path.join("/tmp", prefix));
+  temporaryPaths.push(dir);
+  return dir;
 }
+function tempHome() { return tempDir("yc-"); }
 
 function runBridge(home, cwd, args) {
   return spawnSync(process.execPath, [bridge, ...args], {
     cwd,
-    env: { ...process.env, HOME: home },
+    env: { HOME: home, PI_CODING_AGENT_DIR: path.join(home, ".pi", "agent"), PATH: process.env.PATH, TMPDIR: os.tmpdir() },
+    timeout: 5000,
     encoding: "utf-8",
   });
 }
@@ -38,21 +44,25 @@ function ccMailboxFile(home, cwd) {
 async function startBridge(t, home, cwd) {
   const started = runBridge(home, cwd, ["start"]);
   assert.equal(started.status, 0, started.stderr);
-  t.after(() => runBridge(home, cwd, ["stop"]));
+  t.after(async () => {
+    const pid = core.readRegistry(core.buildPaths(home).registryFile).sessions.find(entry => entry.cwd === fs.realpathSync(cwd))?.pid;
+    runBridge(home, cwd, ["stop"]);
+    for (let attempt = 0; pid && core.isProcessAlive(pid) && attempt < 100; attempt++) await delay(20);
+    if (pid && core.isProcessAlive(pid)) {
+      try { process.kill(pid, "SIGKILL"); } catch {}
+      assert.fail(`test daemon ${pid} did not stop`);
+    }
+  });
 
-  const paths = core.buildPaths(home);
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    const registry = core.readRegistry(paths.registryFile);
-    const session = registry.sessions.find((entry) => entry.cwd === fs.realpathSync(cwd) && entry.name.endsWith(" (CC)"));
-    if (session && fs.existsSync(session.socketPath)) return session;
-    await delay(50);
-  }
-  throw new Error("pi-cc-bridge daemon did not register in time");
+  const session = core.readRegistry(core.buildPaths(home).registryFile).sessions.find(entry => entry.cwd === fs.realpathSync(cwd) && entry.lifecycle === "adopted");
+  assert.ok(session, "start success must mean adopted registry membership immediately");
+  assert.ok(fs.existsSync(session.socketPath));
+  return session;
 }
 
 test("pi-cc-bridge inbox reads retained events and consume advances only its cursor", () => {
   const home = tempHome();
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "cc-cwd-"));
+  const cwd = tempDir("cc-cwd-");
   const paths = core.buildPaths(home);
   const readerKey = ccReaderKey(cwd);
 
@@ -81,7 +91,7 @@ test("pi-cc-bridge inbox reads retained events and consume advances only its cur
 
 test("pi-cc-bridge inbox hook format emits valid Claude hook JSON", () => {
   const home = tempHome();
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "cc-cwd-"));
+  const cwd = tempDir("cc-cwd-");
   const paths = core.buildPaths(home);
   const readerKey = ccReaderKey(cwd);
 
@@ -107,7 +117,7 @@ test("pi-cc-bridge inbox hook format emits valid Claude hook JSON", () => {
 
 test("pi-cc-bridge state reports target state", () => {
   const home = tempHome();
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "cc-cwd-"));
+  const cwd = tempDir("cc-cwd-");
   const paths = core.buildPaths(home);
   core.writeRegistry({ sessions: [
     { pid: process.pid, name: "agent", cwd, socketPath: path.join(paths.ipcDir, `${process.pid}.sock`), startedAt: Date.now(), readerKey: `pi:${process.pid}` },
@@ -128,7 +138,7 @@ test("pi-cc-bridge state reports target state", () => {
 
 test("pi-cc-bridge ACKs duplicate retries without replaying raw mailbox content", async (t) => {
   const home = tempHome();
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "cc-cwd-"));
+  const cwd = tempDir("cc-cwd-");
   const session = await startBridge(t, home, cwd);
   const message = {
     id: "msg_duplicate_retry",
@@ -154,7 +164,7 @@ test("pi-cc-bridge ACKs duplicate retries without replaying raw mailbox content"
 
 test("pi-cc-bridge direct mailbox delivery survives retained journal failures", async (t) => {
   const home = tempHome();
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "cc-cwd-"));
+  const cwd = tempDir("cc-cwd-");
   const paths = core.buildPaths(home);
   core.ensureIpcDir(paths.ipcDir);
   const symlinkTarget = path.join(home, "events-target.jsonl");
@@ -179,4 +189,82 @@ test("pi-cc-bridge direct mailbox delivery survives retained journal failures", 
 
   const mailbox = fs.readFileSync(ccMailboxFile(home, cwd), "utf-8");
   assert.match(mailbox, /deliver despite journal failure/);
+});
+
+test("CC streaming UTF-8 and terminal-safe review preserve stored content", async (t) => {
+  const net = require("node:net");
+  const home = tempHome(), cwd = tempDir("cc-cwd-");
+  const session = await startBridge(t, home, cwd);
+  const content = "é中😀\nnormal\ttab\x1b]52;c;bad\x07\x9b2J";
+  for (let split = 1; split < Buffer.byteLength("é中😀"); split++) {
+    const frame = Buffer.from(JSON.stringify({ id: `split-${split}`, type: "message", fromPid: 123, fromName: "sender", fromCwd: cwd, content, timestamp: Date.now() }) + "\n");
+    const start = frame.indexOf(Buffer.from("é中😀"));
+    await new Promise((resolve, reject) => {
+      const socket = net.createConnection(session.socketPath);
+      socket.setTimeout(2000, () => { socket.destroy(); reject(new Error("ACK timeout")); });
+      socket.on("error", reject);
+      socket.once("data", () => { socket.destroy(); resolve(); });
+      socket.on("connect", () => {
+        socket.write(frame.subarray(0, start + split));
+        setTimeout(() => socket.write(frame.subarray(start + split)), 10);
+      });
+    });
+  }
+  const events = core.readBridgeEvents({ eventsFile: core.buildPaths(home).eventsFile });
+  assert.equal(events.length, 8);
+  assert.ok(events.every(event => event.content === content));
+  for (const command of ["inbox", "mailbox"]) {
+    const output = runBridge(home, cwd, [command]);
+    assert.equal(output.status, 0, output.stderr);
+    assert.doesNotMatch(output.stdout, /[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+    assert.match(output.stdout, /é中😀\nnormal\ttab/);
+  }
+});
+
+test("CC failed mailbox delivery stays retryable and recipient dedupe is scoped", async (t) => {
+  const home = tempHome(), cwd = tempDir("cc-cwd-");
+  const otherCwd = tempDir("cc-other-");
+  const a = await startBridge(t, home, cwd), b = await startBridge(t, home, otherCwd);
+  const message = { id: "retry-after-repair", type: "message", fromPid: 123, fromName: "sender", fromCwd: cwd, content: "must arrive", timestamp: Date.now() };
+  const file = ccMailboxFile(home, cwd);
+  fs.mkdirSync(file);
+  await assert.rejects(core.sendToSocket(a.socketPath, message, { requireAck: true, ackTimeoutMs: 100 }), /ACK/);
+  assert.equal(core.readBridgeEvents({ eventsFile: core.buildPaths(home).eventsFile }).length, 0);
+  fs.rmdirSync(file);
+  for (const receiver of [a, b]) {
+    assert.equal((await core.sendToSocket(receiver.socketPath, message, { requireAck: true })).response.duplicate, false);
+    assert.equal((await core.sendToSocket(receiver.socketPath, message, { requireAck: true })).response.duplicate, true);
+  }
+  assert.match(fs.readFileSync(file, "utf8"), /must arrive/);
+  assert.match(fs.readFileSync(ccMailboxFile(home, otherCwd), "utf8"), /must arrive/);
+});
+
+test("CC mailbox overflow negatively ACKs both send modes, drain/retry and full duplicate notices", async t => {
+  const home = tempHome(), cwd = tempDir("cc-cwd-");
+  const session = await startBridge(t, home, cwd);
+  const file = ccMailboxFile(home, cwd), paths = core.buildPaths(home);
+  const message = { id: "overflow-retry", type: "message", fromPid: 123, fromName: "sender", fromCwd: cwd, content: "retry-body", timestamp: Date.now() };
+  core.appendMailbox(file, "x".repeat(core.MAILBOX_MAX_BYTES));
+  for (const requireAck of [false, true]) await assert.rejects(core.sendToSocket(session.socketPath, message, { requireAck }), /Negative ACK.*full/);
+  assert.equal(core.readBridgeEvents({ eventsFile: paths.eventsFile }).length, 0);
+  assert.equal(fs.statSync(file).size, core.MAILBOX_MAX_BYTES);
+  assert.match(runBridge(home, cwd, ["status"]).stdout, /overflow/);
+  await core.consumeMailbox(file, content => assert.equal(content.length, core.MAILBOX_MAX_BYTES));
+  assert.equal((await core.sendToSocket(session.socketPath, message, { requireAck: true })).response.duplicate, false);
+  core.appendMailbox(file, "x".repeat(core.MAILBOX_MAX_BYTES - fs.statSync(file).size));
+  const duplicate = await core.sendToSocket(session.socketPath, message, { requireAck: true });
+  assert.equal(duplicate.response.duplicate, true); assert.equal(duplicate.response.noticeOmitted, true); assert.match(duplicate.response.warning, /omitted/);
+  assert.equal((fs.readFileSync(file, "utf8").match(/retry-body/g) || []).length, 1);
+  assert.match(core.mailboxOverflowStatus(file), /notice omitted/);
+});
+
+test("CC actual receiver enforces socket count, idle/absolute lifetime and nonreading peer limits", { timeout: 22000 }, async t => {
+  const home = tempHome(), cwd = tempDir("cc-cwd-");
+  const session = await startBridge(t, home, cwd);
+  await require("./fixtures/socket-limits.cjs")(session.socketPath, frames => {
+    const accepted = core.readBridgeEvents({ eventsFile: core.buildPaths(home).eventsFile }).filter(event => event.kind === "message.accepted");
+    assert.deepEqual(accepted.map(event => event.messageId), frames.map(frame => frame.id));
+    const content = fs.readFileSync(ccMailboxFile(home, cwd), "utf8");
+    for (const frame of frames) assert.ok(content.includes(frame.content + "\n"), frame.id);
+  });
 });

@@ -567,17 +567,18 @@ test("activeSessions filters registry socket paths outside the IPC directory", (
   assert.deepEqual(sessions.map((s) => s.name), ["good"]);
 });
 
-test("withRegistryLock creates and removes an owner-only lock file", () => {
+test("withRegistryLock withdraws a unique owner-only claim but preserves its root", () => {
   const paths = core.buildPaths(tempHome());
   let lockPath;
   core.withRegistryLock(paths.registryFile, (createdLockPath) => {
     lockPath = createdLockPath;
     assert.equal(fs.existsSync(lockPath), true);
-    assert.equal(fileMode(lockPath), 0o600);
+    assert.equal(fileMode(lockPath), 0o700);
     return "locked";
   });
 
   assert.equal(fs.existsSync(lockPath), false);
+  assert.equal(fs.statSync(`${paths.registryFile}.lock`).isDirectory(), true);
 });
 
 test("secure write helpers refuse symlink targets", () => {
@@ -877,7 +878,7 @@ test("diagnoseShimVersions reports stale local shim hashes", () => {
     .map((file) => file.name)
     .sort();
   assert.deepEqual(stale, ["lib/pi-bridge-core.js", "pi-cc-bridge"]);
-  assert.deepEqual(missing, ["piroom"]);
+  assert.deepEqual(missing, ["lib/bridge-cli-options.js", "piroom"]);
   assert.match(core.formatShimDiagnostics(result), /piroom: missing/);
   assert.equal(result.ok, false);
 });
@@ -892,12 +893,15 @@ test("syncLocalShims installs piroom with executable permissions", () => {
   fs.writeFileSync(path.join(packageRoot, "bin", "pi-cc-bridge"), "cc");
   fs.writeFileSync(path.join(packageRoot, "bin", "piroom"), "room");
   fs.writeFileSync(path.join(packageRoot, "lib", "pi-bridge-core.js"), "core");
+  fs.writeFileSync(path.join(packageRoot, "lib", "bridge-cli-options.js"), "parser");
 
   const result = core.syncLocalShims({ packageRoot, agentRoot: localRoot });
 
   assert.equal(result.ok, true);
   assert.equal(fs.readFileSync(path.join(localRoot, "bin", "piroom"), "utf-8"), "room");
   assert.equal(fileMode(path.join(localRoot, "bin", "piroom")), 0o755);
+  assert.equal(fs.readFileSync(path.join(localRoot, "lib", "bridge-cli-options.js"), "utf8"), "parser");
+  assert.equal(fileMode(path.join(localRoot, "lib", "bridge-cli-options.js")), 0o600);
 });
 
 test("doctorIpcPermissions reports bridge-owned ipc symlink entries", () => {
@@ -914,29 +918,27 @@ test("doctorIpcPermissions reports bridge-owned ipc symlink entries", () => {
   assert.equal(result.findings.some((finding) => finding.path === link && finding.issue === "symbolic-link"), true);
 });
 
-test("formatNoticeWithControls appends an explicit dismiss footer", () => {
+test("formatNoticeWithControls keeps actions without invented modal controls", () => {
   const notice = core.formatNoticeWithControls("Active Pi sessions:\n  • backend", {
     action: "Use /bridge-send <target> <message> to send a message.",
   });
 
   assert.match(notice, /Active Pi sessions/);
   assert.match(notice, /Use \/bridge-send <target> <message>/);
-  assert.match(notice, /Controls:/);
-  assert.match(notice, /Esc/i);
-  assert.match(notice, /close/i);
+  assert.doesNotMatch(notice, /Controls:|Esc|Ctrl\+C/);
   assert.equal(notice.endsWith("\n"), false);
 });
 
-test("formatMailboxNotice explains close controls and mailbox clearing", () => {
+test("formatMailboxNotice explains mailbox clearing without modal controls", () => {
   const notice = core.formatMailboxNotice("---\nmessage body\n---");
 
   assert.match(notice, /message body/);
-  assert.match(notice, /Mailbox was cleared when this notice opened/);
-  assert.match(notice, /Esc/i);
+  assert.match(notice, /Successful local output handoff clears/);
+  assert.doesNotMatch(notice, /Esc|Ctrl\+C/);
 
   const empty = core.formatMailboxNotice("");
   assert.match(empty, /Bridge mailbox is empty/);
-  assert.match(empty, /Controls:/);
+  assert.doesNotMatch(empty, /Controls:/);
 });
 
 test("room helpers normalize ids and register stable members", () => {
@@ -988,7 +990,7 @@ test("room state mutations use a room-specific lock", () => {
           lockRetryMs: 5,
         },
       ),
-      /Failed to acquire lock/,
+      /Unsupported ownership layout/,
     );
   } finally {
     fs.closeSync(fd);
@@ -1157,7 +1159,7 @@ test("deliverRoomAlerts sends only selected recipients through bridge sockets", 
   assert.equal(result.skipped.length, 0);
 });
 
-test("deliverRoomAlerts refuses ambiguous same-cwd fallback", async () => {
+test("deliverRoomAlerts refuses stale PID rebinding and same-cwd fallback", async () => {
   const state = {
     schemaVersion: 1,
     rooms: {
@@ -1211,8 +1213,8 @@ test("deliverRoomAlerts refuses ambiguous same-cwd fallback", async () => {
     },
   });
 
-  assert.deepEqual(sent.map((item) => item.socketPath), ["/tmp/222.sock"]);
-  assert.equal(named.deliveries.length, 1);
+  assert.deepEqual(sent, []);
+  assert.equal(named.deliveries.length, 0);
 });
 
 test("piroom join post and manager --once render a local room", () => {

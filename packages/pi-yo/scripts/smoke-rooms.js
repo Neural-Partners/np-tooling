@@ -14,7 +14,8 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), "piroom-smoke-"));
 function run(args) {
   const result = spawnSync(process.execPath, [piroom, ...args], {
     cwd: packageRoot,
-    env: { ...process.env, HOME: home },
+    env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: path.join(home, ".pi", "agent") },
+    timeout: 5000,
     encoding: "utf-8",
   });
   if (result.status !== 0) {
@@ -27,7 +28,8 @@ function run(args) {
 
 try {
   assert.match(run(["join", "np-pi-smoke", "--name", "principal"]), /joined np-pi-smoke as principal/);
-  assert.match(run(["join", "np-pi-smoke", "--name", "worker", "--kind", "pi"]), /joined np-pi-smoke as worker/);
+  // State/rendering smoke only; live agent binding/delivery is covered by CLI socket tests.
+  assert.match(run(["join", "np-pi-smoke", "--name", "worker", "--kind", "human"]), /joined np-pi-smoke as worker/);
 
   const posted = run(["post", "np-pi-smoke", "@worker review this !assign @worker", "--name", "principal", "--urgent"]);
   assert.match(posted, /posted to np-pi-smoke thread thr_/);

@@ -233,7 +233,8 @@ async function main() {
     const receipt = await core.sendToSocket(session.socketPath, message);
     const focus = maybeFocusSession(session);
     const safe = safeSession(session);
-    const ack = receipt.acked ? " — ACK received" : ` — delivered, but ${receipt.warning}`;
+    const warning = core.retentionWarning(receipt);
+    const ack = (receipt.acked ? " — ACK received" : ` — delivered, but ${receipt.warning}`) + (warning ? ` — Warning: ${warning}` : "");
     console.log(
       `✓ ${verb} to "${safe.name}" (${safe.cwd})${focusSuffix(focus)}${ack}`,
     );

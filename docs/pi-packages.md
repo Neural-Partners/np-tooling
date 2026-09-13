@@ -72,7 +72,7 @@ Common peer dependencies for Pi extension packages:
 ```json
 {
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   }
 }
@@ -104,6 +104,17 @@ Instructions go here.
 ```
 
 Descriptions matter because Pi uses them to decide when to load the skill.
+
+## Publishing model
+
+Use two lanes:
+
+- **Public packages** live under `packages/<package-name>/` and are published/registered on npm.
+- **Internal Neural Partners packages** ship as git packages. Do not publish internal-only packages to npm.
+
+Public npm packages should include registry-safe metadata, public docs, public assets, and no Neural Partners/customer-specific defaults.
+
+Internal git packages can still follow Pi package conventions (`package.json`, `pi` manifest, `extensions/`, `skills/`, `prompts/`, `themes/`) but should be installed from git URLs rather than npm registry names.
 
 ## Local and private work
 
