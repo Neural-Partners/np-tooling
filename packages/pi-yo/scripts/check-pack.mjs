@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { smokePi } from "./smoke-pi.mjs";
+import { smokeCc } from "./smoke-cc.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const temp = fs.mkdtempSync(path.join(os.tmpdir(), "yo-pack-"));
-const env = { HOME: path.join(temp, "home"), PATH: process.env.PATH, TMPDIR: os.tmpdir(), npm_config_cache: path.join(temp, "cache") };
+const temp = fs.mkdtempSync("/tmp/yp-");
+const env = { HOME: path.join(temp, "home"), PI_CODING_AGENT_DIR: path.join(temp, "home/.pi/agent"), PATH: process.env.PATH, TMPDIR: "/tmp", npm_config_cache: path.join(temp, "cache"), npm_config_ignore_scripts: "true" };
 fs.mkdirSync(env.HOME);
 function run(command, args, cwd = temp) {
   const result = spawnSync(command, args, { cwd, env, encoding: "utf8", timeout: 120000 });
@@ -31,6 +31,7 @@ try {
   assert.equal(fs.existsSync(path.join(prefix, "node_modules", "@earendil-works", "pi-coding-agent")), false, "optional host peer must not auto-install Pi");
   for (const [bin, args] of [["pimsg", ["list"]], ["piroom", ["--help"]], ["pi-cc-bridge", ["inbox"]]]) run(path.join(prefix, "node_modules", ".bin", bin), args, prefix);
   run(process.execPath, [path.join(installed, "scripts", "smoke-rooms.js")], prefix);
+  await smokeCc(installed);
   const audit = JSON.parse(run("npm", ["audit", "--omit=dev", "--json"], prefix));
   assert.equal(audit.metadata.vulnerabilities.total, 0);
   console.log("Clean tarball install audit: 0 vulnerabilities; standalone bins and room smoke passed");

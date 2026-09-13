@@ -221,7 +221,7 @@ test("failed mailbox read preserves the renamed copy", (t) => {
 
 test("actual extension handlers cover queue failure/retry, UTF-8, policy, alias, routing and shutdown", (t) => {
   const dir = sandbox(t);
-  const result = spawnSync(process.execPath, [path.join(__dirname, "fixtures/extension-harness.cjs")], { env: { HOME: dir, PATH: process.env.PATH }, timeout: 12000, encoding: "utf8" });
+  const result = spawnSync(process.execPath, [path.join(__dirname, "fixtures/extension-harness.cjs")], { env: { HOME: dir, PI_CODING_AGENT_DIR: path.join(dir, "agent"), PATH: process.env.PATH }, timeout: 30000, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /extension behavior passed/);
 });

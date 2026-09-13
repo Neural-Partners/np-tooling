@@ -74,7 +74,32 @@ async function run() {
   assert.equal((await send({ ...msg, id: "held" })).acked, true);
   assert.equal(injected.length, before);
   assert.ok(notices.some(notice => /Invalid bridge policy/.test(notice.text)));
+  const mailbox = path.join(paths.ipcDir, `${process.pid}.mailbox`);
   await commands.get("bridge-mailbox").handler("", ctx);
+  core.appendMailbox(mailbox, "x".repeat(core.MAILBOX_MAX_BYTES));
+  for (const requireAck of [false, true]) await assert.rejects(core.sendToSocket(socketPath, { ...msg, id: "overflow" }, { requireAck }), /Negative ACK.*full/);
+  assert.equal(core.readBridgeEvents().some(event => event.messageId === "overflow"), false);
+  await commands.get("bridge-mailbox").handler("", { ...ctx, hasUI: false });
+  assert.equal(fs.statSync(mailbox).size, core.MAILBOX_MAX_BYTES);
+  await commands.get("bridge-mailbox").handler("", ctx);
+  assert.ok(notices.some(notice => /Sender must retry/.test(notice.text)));
+  assert.equal((await send({ ...msg, id: "overflow" })).response.duplicate, false);
+  assert.equal((await send({ ...msg, id: "overflow" })).response.duplicate, true);
+  // Policy edits must not reset active usage; use an independent PID.
+  const savePolicy = limit => fs.writeFileSync(policyFile, JSON.stringify({ rateLimit: { perSenderPer10s: limit } }));
+  savePolicy(2);
+  await send({ ...msg, id: "limit-1", fromPid: 789 }); await send({ ...msg, id: "limit-2", fromPid: 789 });
+  const admitted = injected.length;
+  savePolicy(1); await send({ ...msg, id: "limit-lowered", fromPid: 789 }); assert.equal(injected.length, admitted);
+  savePolicy(3); await send({ ...msg, id: "limit-raised", fromPid: 789 }); assert.equal(injected.length, admitted + 1);
+  await send({ ...msg, id: "limit-denied", fromPid: 789 }); assert.equal(injected.length, admitted + 1);
+  fs.writeFileSync(policyFile, "{");
+  await require("./socket-limits.cjs")(socketPath, frames => {
+    const accepted = core.readBridgeEvents().filter(event => event.kind === "message.accepted" && event.messageId.startsWith("half-message-"));
+    assert.deepEqual(accepted.map(event => event.messageId), frames.map(frame => frame.id));
+    const content = fs.readFileSync(mailbox, "utf8");
+    for (const frame of frames) assert.ok(content.includes(frame.content + "\n"), frame.id);
+  });
   await commands.get("room").handler("join project as principal", ctx);
   await commands.get("room").handler("post project hello", ctx);
   await commands.get("room").handler("follow project thread-one", ctx);
@@ -117,7 +142,7 @@ async function run() {
       assert.match(receipt.content[0].text, /ACK received.*Warning: retained journal failed/);
       assert.doesNotMatch(receipt.content[0].text, /[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
     }
-    const { stdout } = await require("node:util").promisify(require("node:child_process").execFile)(process.execPath, [path.resolve(__dirname, "../../bin/pimsg"), String(process.ppid), "test"], { cwd: ctx.cwd, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeout: 2000 });
+    const { stdout } = await require("node:util").promisify(require("node:child_process").execFile)(process.execPath, [path.resolve(__dirname, "../../bin/pimsg"), String(process.ppid), "test"], { cwd: ctx.cwd, env: { HOME: process.env.HOME, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, PATH: process.env.PATH }, timeout: 2000 });
     assert.match(stdout, /ACK received.*Warning: retained journal failed/);
     assert.doesNotMatch(stdout, /[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
   } finally { await new Promise(resolve => warningServer.close(resolve)); core.unregisterSession(process.ppid); }
@@ -148,7 +173,7 @@ async function run() {
   await handlers.get("session_shutdown")({});
   await closed;
   assert.equal(fs.existsSync(socketPath), false);
-  assert.equal(injected.length, before);
+  assert.equal(injected.length, admitted + 1);
   await handlers.get("session_shutdown")({});
   await handlers.get("session_start")({}, ctx);
   await handlers.get("session_shutdown")({});

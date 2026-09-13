@@ -8,6 +8,7 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const core = require("../lib/pi-bridge-core.js");
+const { parseRoomCommand } = require("../lib/bridge-cli-options.js");
 
 function die(message, code = 1) {
   process.stderr.write(`${message}\n`);
@@ -26,21 +27,6 @@ function printHelp() {
     "",
     "Default alerts are mention/thread/assignment only; normal chatter stays in the room log.",
   ].join("\n"));
-}
-
-function takeFlag(args, name) {
-  const index = args.indexOf(name);
-  if (index < 0) return undefined;
-  const value = args[index + 1];
-  args.splice(index, value === undefined || value.startsWith("--") ? 1 : 2);
-  return value === undefined || value.startsWith("--") ? "" : value;
-}
-
-function hasFlag(args, name) {
-  const index = args.indexOf(name);
-  if (index < 0) return false;
-  args.splice(index, 1);
-  return true;
 }
 
 function defaultName() {
@@ -64,22 +50,18 @@ function agentSessionFor(name) {
   return matches[0];
 }
 
-function cmdJoin(args) {
-  const room = args.shift();
-  const name = takeFlag(args, "--name") || defaultName();
-  const kind = takeFlag(args, "--kind") || "human";
+function cmdJoin({ positionals: [room], options, name }) {
+  const kind = options["--kind"] ?? "human";
   if (!room) die("Usage: piroom join <room> --name <name>");
   const session = kind === "pi" || kind === "cc" ? agentSessionFor(name) : sessionFor(name);
   const joined = core.joinRoom({ room, name, kind, session });
   console.log(`joined ${joined.room.roomId} as ${joined.member.displayName}`);
 }
 
-async function cmdPost(args) {
-  const room = args.shift();
-  const name = takeFlag(args, "--name") || defaultName();
-  const threadId = takeFlag(args, "--thread");
-  const urgent = hasFlag(args, "--urgent");
-  const content = args.join(" ").trim();
+async function cmdPost({ positionals: [room, ...text], options, name }) {
+  const threadId = options["--thread"];
+  const urgent = options["--urgent"] === true;
+  const content = text.join(" ").trim();
   if (!room || !content) die("Usage: piroom post <room> <message...> [--name <name>] [--thread <threadId>] [--urgent]");
   const posted = core.postRoomMessage({
     room,
@@ -96,19 +78,13 @@ async function cmdPost(args) {
   console.log(`posted to ${posted.event.roomId} thread ${posted.event.threadId}${suffix}`);
 }
 
-function cmdFollow(args) {
-  const room = args.shift();
-  const threadId = args.shift();
-  const name = takeFlag(args, "--name") || defaultName();
+function cmdFollow({ positionals: [room, threadId], name }) {
   if (!room || !threadId) die("Usage: piroom follow <room> <threadId> --name <name>");
   const followed = core.followRoomThread({ room, name, threadId });
   console.log(`${followed.member.displayName} follows ${threadId} in ${followed.room.roomId}`);
 }
 
-function cmdDnd(args) {
-  const room = args.shift();
-  const action = args.shift() || "status";
-  const name = takeFlag(args, "--name") || defaultName();
+function cmdDnd({ positionals: [room, action = "status"], name }) {
   if (!room) die("Usage: piroom dnd <room> on|off|status --name <name>");
   if (action === "status") {
     const state = core.readRoomState();
@@ -138,10 +114,9 @@ function renderManager(room) {
   process.stdout.write(core.terminalSafeText(core.formatRoomManagerSnapshot(room)) + "\n");
 }
 
-function cmdManager(args) {
-  const room = args.shift();
-  const once = hasFlag(args, "--once");
-  const interval = Number.parseInt(takeFlag(args, "--interval") || "2000", 10);
+function cmdManager({ positionals: [room], options }) {
+  const once = options["--once"];
+  const interval = Number(options["--interval"] ?? "2000");
   if (!room) die("Usage: piroom manager <room> [--once] [--interval <ms>]");
   if (once) {
     renderManager(room);
@@ -153,7 +128,7 @@ function cmdManager(args) {
     process.stdout.write("\nq/Ctrl+C to quit • refreshes automatically\n");
   };
   tick();
-  const timer = setInterval(tick, Number.isSafeInteger(interval) && interval > 250 ? interval : 2000);
+  const timer = setInterval(tick, interval);
   process.stdin.setRawMode?.(true);
   process.stdin.resume();
   process.stdin.on("data", (chunk) => {
@@ -166,8 +141,8 @@ function cmdManager(args) {
 }
 
 async function main() {
-  const args = process.argv.slice(2);
-  const command = args.shift();
+  const args = parseRoomCommand(process.argv.slice(2), core, defaultName());
+  const command = args.command;
   if (!command || command === "--help" || command === "-h") {
     printHelp();
     return;

@@ -94,15 +94,17 @@ Good messages answer: who owns the next step, what changed, what is blocked, and
 
 ACK means transport accepted the message. Separate transport ACK from task ACK: transport ACK means delivered, injected, or mailboxed; task ACK means the receiver explicitly accepted ownership or responded with `ack`, `deliverable`, `blocker`, or `qa-result`.
 
-Pi messages can be held instead of auto-injected by mailbox-only mode, allowlists, or rate limits. Invalid existing policies (including blank restrictions) fail closed; missing-policy auto-injection remains compatible. Size caps reject oversized wire frames, and terminal-safe rendering only affects display, not policy routing.
+Mailbox-only/allowlist/rate policies can hold Pi and hook messages. Invalid existing policies fail closed; missing policies default to auto-inject. Wire caps reject oversized frames; terminal-safe rendering changes display, not stored payloads.
 
-**CC hook scope gap:** `pi-cc-bridge inbox --format hook --consume` does not honor Pi delivery policy. Do not enable automatic CC hooks when mailbox-only/allowlist restrictions are required; inspect with `pi-cc-bridge inbox` manually. Journals have finite retention, and expired cursors warn/replay retained history. ACK/deduplication is not exactly-once across crashes, journal failures, or retention expiry.
+**CC hooks are opt-in and policy-controlled.** Hook `--consume` advances a separate scan watermark, never manual unread visibility. Text `inbox --consume` suppresses future hook delivery. Scanned held originals stay manual-only after policy repair; duplicate receipts never inject. Batches scan64 records/emit64 originals/64KiB serialized output. Oversized originals stay pending for manual inspection/consumption. Non-consuming outputs spend persisted quota without moving cursors. Malformed state fails closed; read-only `inbox --all` permits inspection. Retention expiry warns/replays; output/ACK is not exactly-once or proof of ingestion.
+
+Mailboxes reject entries beyond1MiB; negative ACK means failure and sender retry after manual drain. Upgrade both peers: old clients ignore rejection. Overflow is visible in status/mailbox review; one recovery preserves failed output. Receivers bound sockets32/idle2s/lifetime5s and1024 fixed-window PID buckets. Limit edits preserve usage; Pi quotas reset on restart, hook quotas persist. See README for migration, resource envelopes and crash limits.
 
 Human review commands:
 
-- `/bridge-mailbox` reviews held inbound messages in Pi. Opening the mailbox reads and clears it.
+- `/bridge-mailbox` reviews held inbound messages in Pi. Successful local notification handoff clears it; output errors preserve recovery.
 - `pi-cc-bridge inbox --format hook --consume` reads the retained inbox for Claude Code hook delivery without deleting journal history.
-- `pi-cc-bridge mailbox` prints held Claude Code bridge messages; this legacy path is read-and-clear.
+- `pi-cc-bridge mailbox` prints held Claude Code bridge messages; successful local output clears its single recovery snapshot; failure preserves it.
 
 If a message is urgent and no response comes back, ask the user before escalating or retrying repeatedly.
 
@@ -139,17 +141,12 @@ When the human asks for manual coordination, reference these commands:
 
 ## Quick Reference
 
-- Discover peers: `list_sessions`
-- Update current work state: `update_session_status`
-- Check a peer before dispatch: `pimsg state <target>` or `pimsg list --with-status`
-- Claude Code retained inbox: `pi-cc-bridge inbox --format hook --consume`
-- Hide/reveal this Pi session: `set_session_visibility`
 - Join a local room: `join_chat_room`
 - Post to a local room: `post_room_message`
 - Follow a local room thread: `follow_room_thread`
 - New handoff/FYI/request: `send_to_session`
 - Response to inbound message: `reply_to_session`
 - Invisible sessions: hidden from normal discovery/name/cwd/fuzzy targeting; Exact PID still works
-- Duplicate target warning: use exact PID, cwd, or role alias
-- Receipt language: "delivered/ACKed" only means transport accepted it
 - Coordination envelope: include `runId`, `msgId`, `replyTo`, roles, type, status, paths, summary, blockers, and reply expectation
+
+For hyphen-leading room text use `piroom post project --name worker -- "- first point" "--urgent"`; everything after `--` is literal text. Invalid/duplicate/unknown options fail before mutation; omitted defaults are unchanged.

@@ -14,7 +14,8 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), "piroom-smoke-"));
 function run(args) {
   const result = spawnSync(process.execPath, [piroom, ...args], {
     cwd: packageRoot,
-    env: { ...process.env, HOME: home },
+    env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: path.join(home, ".pi", "agent") },
+    timeout: 5000,
     encoding: "utf-8",
   });
   if (result.status !== 0) {

@@ -23,6 +23,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const core = require("../lib/pi-bridge-core.js");
+const { parseCcCommand } = require("../lib/bridge-cli-options.js");
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -34,7 +35,10 @@ const cwdHash = crypto.createHash("sha256").update(cwd).digest("hex").slice(0, 8
 const name = path.basename(cwd) + " (CC)";
 
 const PID_FILE = path.join(IPC_DIR, `cc-${cwdHash}.pid`);
-const SOCKET_FILE = path.join(IPC_DIR, `cc-${cwdHash}.sock`);
+const LEGACY_SOCKET_FILE = path.join(IPC_DIR, `cc-${cwdHash}.sock`);
+const OWNER_RESOURCE = path.join(IPC_DIR, `cc-${cwdHash}.owner`);
+const CONTROL_PROTOCOL = "pi-cc/1";
+const START_TIMEOUT_MS = 3000;
 const MAILBOX_FILE = path.join(IPC_DIR, `cc-${cwdHash}.mailbox`);
 const META_FILE = path.join(IPC_DIR, `cc-${cwdHash}.json`);
 const READER_KEY = core.sessionReaderKey({ name, cwd });
@@ -45,24 +49,103 @@ function ensureIpcDir() {
   core.ensureIpcDir(IPC_DIR);
 }
 
-function readPid() {
-  try { return parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10); }
-  catch { return null; }
+function refuseLegacyDaemon() {
+  for (const file of [PID_FILE, META_FILE, LEGACY_SOCKET_FILE]) {
+    try { fs.lstatSync(file); }
+    catch (err) { if (err.code === "ENOENT") continue; throw err; }
+    throw new Error(`Legacy/unknown CC state at ${file}. Stop all old bridge/Pi writers, upgrade and synchronize shims, then perform independently quiesced recovery. Never delete live locks or daemon files.`);
+  }
 }
 
-function daemonRunning() {
-  const pid = readPid();
-  return pid !== null && core.isExpectedDaemonProcess(pid, { metadataFile: META_FILE, cwd, scriptPath: __filename });
+function validateGeneration(entry) {
+  if (!entry || entry.cwd !== cwd || entry.ccProtocol !== CONTROL_PROTOCOL ||
+      typeof entry.generation !== "string" || !/^cc1:[1-9][0-9]*\.[a-f0-9]{32}\.[1-9][0-9]*$/.test(entry.generation) ||
+      !core.isAllowedBridgeSocketPath(entry.socketPath, IPC_DIR) ||
+      !/^cg-[a-f0-9]{24}\.sock$/.test(path.basename(entry.socketPath))) {
+    throw new Error("Unknown/mismatched CC generation; quiesced upgrade/recovery required");
+  }
+  core.assertSocketPathLength(entry.socketPath);
+  return entry;
+}
+
+function registryGeneration(generation) {
+  return core.readRegistry(REGISTRY_FILE).sessions.find(entry => entry.cwd === cwd && entry.generation === generation);
+}
+
+function control(entry, action, timeoutMs = 600) {
+  validateGeneration(entry);
+  return new Promise((resolve, reject) => {
+    const requestId = crypto.randomBytes(16).toString("hex");
+    const socket = net.createConnection(entry.socketPath);
+    let buffer = "", settled = false;
+    const timer = setTimeout(() => finish(new Error(`CC ${action} timed out`)), timeoutMs);
+    function finish(error, response) {
+      if (settled) return;
+      settled = true; clearTimeout(timer); socket.destroy();
+      if (error) reject(error); else resolve(response);
+    }
+    socket.setEncoding("utf8");
+    socket.on("error", error => finish(error));
+    socket.on("close", () => finish(new Error(`CC ${action} closed without response`)));
+    socket.on("connect", () => socket.write(JSON.stringify({ ccProtocol: CONTROL_PROTOCOL, generation: entry.generation, requestId, action }) + "\n"));
+    socket.on("data", chunk => {
+      const collected = core.collectJsonLines(buffer, chunk);
+      if (collected.overflow) return finish(new Error("Oversized CC control response"));
+      buffer = collected.buffer;
+      for (const line of collected.lines) {
+        try {
+          const response = JSON.parse(line);
+          if (response.ccProtocol !== CONTROL_PROTOCOL || response.generation !== entry.generation || response.requestId !== requestId || response.cwd !== cwd || response.socketPath !== entry.socketPath || !response.ok) {
+            return finish(new Error("Mismatched CC control response"));
+          }
+          finish(null, response);
+        } catch (err) { finish(err); }
+      }
+    });
+  });
+}
+
+async function adoptedIncumbent(intent) {
+  const claims = [];
+  const generations = core.readOwnershipGenerations(OWNER_RESOURCE, { onClaim: claim => claims.push(claim) });
+  for (const metadata of generations) {
+    if (!metadata || metadata.cwd !== cwd) throw new Error("CC ownership cwd mismatch/hash collision; quiesced recovery required");
+    validateGeneration(metadata);
+  }
+  if (intent && !intent.generation && !intent.restartGeneration && claims.length) {
+    // Bind before awaiting status: disappearance or a later STOPPING cannot erase intent.
+    intent.generation = `cc1:${claims[0].id}`;
+    const metadata = generations.find(entry => entry.generation === intent.generation);
+    if (metadata) {
+      const registered = registryGeneration(intent.generation);
+      // Trusted-local, generation-qualified first STOPPING survives endpoint closure.
+      // Never upgrade duplicate intent from a later asynchronous status response.
+      const stopping = registered?.lifecycle === "stopping" && registered.cwd === metadata.cwd &&
+        registered.socketPath === metadata.socketPath && registered.ccProtocol === metadata.ccProtocol;
+      if (stopping) {
+        intent.restartGeneration = intent.generation;
+        delete intent.generation;
+      }
+    }
+  }
+  for (const entry of core.readRegistry(REGISTRY_FILE).sessions) {
+    if (entry.ccProtocol && crypto.createHash("sha256").update(String(entry.cwd)).digest("hex").slice(0, 8) === cwdHash && entry.cwd !== cwd) {
+      throw new Error("CC cwd hash collision; refusing another cwd's ownership");
+    }
+    if (entry.cwd !== cwd || !entry.name?.endsWith(" (CC)")) continue;
+    validateGeneration(entry);
+    if (intent && (entry.generation === intent.restartGeneration || entry.generation !== intent.generation)) continue;
+    if (entry.lifecycle !== "adopted") continue;
+    try {
+      const response = await control(entry, "status");
+      if (response.lifecycle === "adopted" && registryGeneration(entry.generation)?.lifecycle === "adopted") return entry;
+    } catch { /* Unreachable metadata is never authority to signal or delete. */ }
+  }
+  return null;
 }
 
 function secureWrite(file, content) {
   core.secureWriteFile(file, content);
-}
-
-function ensureSecureFile(file) {
-  if (!fs.existsSync(file)) secureWrite(file, "");
-  else core.appendFileSecure(file, "");
-  core.chmodSafe(file, 0o600);
 }
 
 function die(msg, code = 1) {
@@ -79,11 +162,7 @@ function socketResponse(type, msg, extra = {}) {
 }
 
 function writeSocketResponse(socket, response) {
-  try {
-    socket.write(JSON.stringify(response) + "\n", "utf-8");
-  } catch {
-    // Best effort. The sender still has socket write success/failure.
-  }
+  core.writeSocketResponseBounded(socket, response);
 }
 
 function acceptMessage(msg, deliver) {
@@ -108,7 +187,7 @@ function journalReceiptMetadata(recording) {
 }
 
 function appendDuplicateToMailbox(msg, recorded) {
-  core.appendFileSecure(MAILBOX_FILE, core.formatDuplicateMessageNotice(msg, recorded));
+  core.appendMailbox(MAILBOX_FILE, core.formatDuplicateMessageNotice(msg, recorded), { duplicateNotice: true });
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
@@ -120,56 +199,35 @@ function mailboxCount() {
   } catch { return 0; }
 }
 
-function cmdStatus() {
-  if (daemonRunning()) {
-    const pid = readPid();
-    console.log(`✓ pi-cc-bridge is running  pid:${pid}  cwd:${cwd}`);
+async function cmdStatus() {
+  ensureIpcDir(); refuseLegacyDaemon();
+  const entry = await adoptedIncumbent();
+  const overflow = core.mailboxOverflowStatus(MAILBOX_FILE);
+  if (overflow) console.log(overflow);
+  if (entry) {
+    console.log(`✓ pi-cc-bridge is running  pid:${entry.pid}  cwd:${cwd}`);
     const msgs = mailboxCount();
     if (msgs > 0) console.log(`  ${msgs} unread message(s) — run: pi-cc-bridge mailbox`);
   } else {
-    console.log(`✗ pi-cc-bridge is NOT running for: ${cwd}`);
+    console.log(`✗ pi-cc-bridge is NOT verified running for: ${cwd}`);
     console.log("  Run: pi-cc-bridge start");
   }
 }
 
-function cmdMailbox() {
+async function cmdMailbox() {
   ensureIpcDir();
-  try {
-    const content = core.readAndClearFileAtomic(MAILBOX_FILE).trim();
-    if (!content) {
-      console.log("(no new messages)");
-    } else {
-      console.log(core.terminalSafeText(content));
-    }
-  } catch (err) {
-    die(core.terminalSafeText(`Failed to read mailbox: ${err.message}`));
-  }
+  const overflow = core.mailboxOverflowStatus(MAILBOX_FILE);
+  if (overflow) process.stderr.write(overflow + "\n");
+  await core.consumeMailbox(MAILBOX_FILE, content => core.writeOutput(process.stdout, core.terminalSafeText(content.trim() || "(no new messages)") + "\n"));
 }
 
-function cmdInbox(args = []) {
-  ensureIpcDir();
-  const consume = args.includes("--consume");
-  const all = args.includes("--all");
-  const formatIndex = args.indexOf("--format");
-  const format = formatIndex >= 0 ? args[formatIndex + 1] : "text";
-  const inbox = core.readInboxEvents({
-    readerKey: READER_KEY,
-    all,
+async function cmdInbox({ options }) {
+  await core.withInboxTransaction({
+    readerKey: READER_KEY, consume: options["--consume"] === true,
+    all: options["--all"] === true, format: options["--format"] || "text",
+    onDiagnostic: text => process.stderr.write(core.terminalSafeText(text) + "\n"),
+    handoff: text => core.writeOutput(process.stdout, text),
   });
-
-  if (inbox.cursorExpired) process.stderr.write("Warning: inbox cursor expired from retained history; showing all retained events (some may have been read).\n");
-
-  if (format === "hook") {
-    const payload = core.formatInboxHookPayload(inbox.events);
-    if (payload) process.stdout.write(payload + "\n");
-  } else {
-    const formatted = core.formatInboxEvents(inbox.events).trim();
-    console.log(core.terminalSafeText(formatted || "(no new messages)"));
-  }
-
-  if (consume && inbox.events.length > 0) {
-    core.consumeInboxEvents(inbox);
-  }
 }
 
 function cmdState(args = []) {
@@ -179,31 +237,27 @@ function cmdState(args = []) {
   console.log(report.text);
 }
 
-function cmdStop() {
-  const pid = readPid();
-  if (!pid || !core.isProcessAlive(pid)) {
-    console.log("pi-cc-bridge is not running.");
-    return;
+async function cmdStop() {
+  ensureIpcDir(); refuseLegacyDaemon();
+  const entries = core.readRegistry(REGISTRY_FILE).sessions.filter(entry => entry.cwd === cwd && entry.ccProtocol);
+  if (!entries.length) { console.log("pi-cc-bridge is not registered; no process signalled or files removed."); return; }
+  const entry = validateGeneration(entries[entries.length - 1]);
+  await control(entry, "stop");
+  const deadline = performance.now() + 2500;
+  const claimPath = path.join(`${OWNER_RESOURCE}.lock`, entry.generation.slice(4));
+  while (performance.now() < deadline) {
+    if (!registryGeneration(entry.generation) && !fs.existsSync(claimPath)) {
+      console.log(`Stopped pi-cc-bridge (generation:${entry.generation})`); return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
   }
-  if (!core.isExpectedDaemonProcess(pid, { metadataFile: META_FILE, cwd, scriptPath: __filename })) {
-    try { fs.unlinkSync(PID_FILE); } catch {}
-    try { fs.unlinkSync(META_FILE); } catch {}
-    console.log(`Removed stale/unverified pi-cc-bridge pid file for pid:${pid}; did not kill process.`);
-    return;
-  }
-  try {
-    process.kill(pid, "SIGTERM");
-    console.log(`Stopped pi-cc-bridge (pid:${pid})`);
-  } catch (e) {
-    die(`Failed to stop: ${e.message}`);
-  }
+  throw new Error(`pi-cc-bridge stopping; cancellation pending for ${entry.generation}`);
 }
 
 // ─── Daemon ──────────────────────────────────────────────────────────────────
 
 function appendToMailbox(msg) {
   ensureIpcDir();
-  ensureSecureFile(MAILBOX_FILE);
 
   const ts = new Date(msg.timestamp).toLocaleString();
   const sender = msg.fromName !== path.basename(msg.fromCwd)
@@ -227,169 +281,277 @@ function appendToMailbox(msg) {
     ``,
   ].join("\n");
 
-  core.appendFileSecure(MAILBOX_FILE, entry);
+  core.appendMailbox(MAILBOX_FILE, entry);
 }
 
-function runDaemon() {
-  ensureIpcDir();
-
-  secureWrite(PID_FILE, String(process.pid));
-  core.writePidMetadata(META_FILE, { pid: process.pid, cwd, scriptPath: __filename, socketPath: SOCKET_FILE });
-
-  try { fs.unlinkSync(SOCKET_FILE); } catch {}
-
-  let heartbeatTimer;
-  function touchHeartbeat() {
-    try {
-      core.updateRegisteredSession(process.pid, { lastHeartbeatAt: Date.now(), readerKey: READER_KEY }, REGISTRY_FILE);
-      core.updateSessionStatus({
-        pid: process.pid,
-        name,
-        cwd,
-        readerKey: READER_KEY,
-      });
-    } catch {}
+async function runDaemon() {
+  let claim, entry, server, heartbeatTimer, cleanupPromise;
+  let socketBound = false, startupInFlight = true;
+  let lifecycle = "claimed", cancelled = false, adopted = false;
+  let launchId, incumbentFound, launchIntent;
+  const deadline = performance.now() + START_TIMEOUT_MS;
+  const sockets = new Set();
+  function send(message) {
+    if (process.connected) process.send({ ...message, launchId }, error => { if (error && !adopted) cancel(); });
   }
-
-  const server = net.createServer((socket) => {
-    socket.setEncoding("utf8");
-    let buffer = "";
-    socket.on("data", (chunk) => {
-      const collected = core.collectJsonLines(buffer, chunk);
-      if (collected.overflow) {
-        socket.destroy();
-        return;
-      }
-      buffer = collected.buffer;
-      for (const line of collected.lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const parsed = JSON.parse(trimmed);
-          const validation = core.validateBridgeMessage(parsed);
-          if (!validation.ok) continue;
-          const msg = validation.value;
-          if (msg.type === "message") {
-            const recording = acceptMessage(msg, (recorded) => {
-              if (recorded?.duplicate) appendDuplicateToMailbox(msg, recorded);
-              else appendToMailbox(msg);
-            });
-            writeSocketResponse(socket, socketResponse("ack", msg, journalReceiptMetadata(recording)));
-          } else if (msg.type === "ping") {
-            writeSocketResponse(socket, socketResponse("pong", msg));
-          }
-        } catch {
-          // Malformed messages are ignored.
-        }
-      }
-    });
-    socket.on("error", () => {});
-  });
-
-  server.listen(SOCKET_FILE, () => {
-    core.chmodSafe(SOCKET_FILE, 0o600);
-    core.registerSession({
-      pid: process.pid,
-      name,
-      cwd,
-      socketPath: SOCKET_FILE,
-      startedAt: Date.now(),
-      readerKey: READER_KEY,
-      lastHeartbeatAt: Date.now(),
-      ...(process.env.SUPACODE_TAB_ID && {
-        supacodeTabId: process.env.SUPACODE_TAB_ID,
-        supacodeWorktreeId: process.env.SUPACODE_WORKTREE_ID,
-        supacodeSurfaceId: process.env.SUPACODE_SURFACE_ID,
-      }),
-    }, REGISTRY_FILE);
-    core.updateSessionStatus({
-      pid: process.pid,
-      name,
-      cwd,
-      readerKey: READER_KEY,
-      status: "idle",
-    });
-    heartbeatTimer = setInterval(touchHeartbeat, 30_000);
-    heartbeatTimer.unref?.();
-  });
-
+  function checkDeadline() {
+    if (!adopted && (cancelled || !process.connected || performance.now() >= deadline)) throw new Error("Startup cancelled/deadline expired");
+  }
+  function requestStop() {
+    cancelled = true;
+    if (!startupInFlight) void cleanup();
+  }
+  function cancel() { if (!adopted) requestStop(); }
   function cleanup() {
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    core.unregisterSession(process.pid, REGISTRY_FILE);
-    server.close();
-    try { fs.unlinkSync(SOCKET_FILE); } catch {}
-    try { fs.unlinkSync(PID_FILE); } catch {}
-    try { fs.unlinkSync(META_FILE); } catch {}
-    process.exit(0);
+    if (cleanupPromise) return cleanupPromise;
+    lifecycle = "stopping";
+    clearInterval(heartbeatTimer);
+    cleanupPromise = (async () => {
+      if (entry) {
+        try { core.updateRegisteredSession(process.pid, { lifecycle: "stopping" }, REGISTRY_FILE, entry.generation); }
+        catch (error) { process.stderr.write(`CC stopping publication failed; restart may require retry: ${error.message}\n`); }
+      }
+      if (server) {
+        await new Promise(resolve => {
+          const timer = setTimeout(() => { for (const socket of sockets) socket.destroy(); resolve(); }, 200);
+          server.close(() => { clearTimeout(timer); resolve(); });
+        });
+        for (const socket of sockets) socket.destroy();
+      }
+      if (entry) {
+        core.unregisterSession(process.pid, REGISTRY_FILE, entry.generation);
+        // Only this generation's endpoint; never a shared/reusable name.
+        try {
+          if (socketBound) {
+            if (!fs.lstatSync(entry.socketPath).isSocket()) throw new Error(`Refusing unexpected generation endpoint: ${entry.socketPath}`);
+            fs.unlinkSync(entry.socketPath);
+          }
+        }
+        catch (err) { if (err.code !== "ENOENT") throw err; }
+      }
+      if (claim) claim.release(); // Last: no serving or asynchronous mutation remains.
+      lifecycle = "released";
+    })().catch(error => { process.stderr.write(`CC cleanup: ${error.message}\n`); process.exitCode = 1; })
+      .finally(() => { if (process.connected) process.disconnect(); });
+    return cleanupPromise;
   }
-
-  process.on("SIGTERM", cleanup);
-  process.on("SIGINT", cleanup);
-  process.on("exit", () => {
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    core.unregisterSession(process.pid, REGISTRY_FILE);
-    try { fs.unlinkSync(SOCKET_FILE); } catch {}
-    try { fs.unlinkSync(PID_FILE); } catch {}
-    try { fs.unlinkSync(META_FILE); } catch {}
+  process.on("disconnect", cancel);
+  process.on("SIGTERM", requestStop);
+  process.on("SIGINT", requestStop);
+  let adoptResolve;
+  const adoption = new Promise(resolve => { adoptResolve = resolve; });
+  process.on("message", message => {
+    if (!message || message.launchId !== launchId) return;
+    if (message.action === "abort") cancel();
+    if (message.action === "adopt" && message.generation === entry?.generation && lifecycle === "prepared") {
+      try {
+        checkDeadline();
+        if (!core.updateRegisteredSession(process.pid, { lifecycle: "adopted" }, REGISTRY_FILE, entry.generation)) throw new Error("Generation registration lost");
+        checkDeadline();
+        adopted = true; lifecycle = "adopted";
+        send({ action: "adopted", entry: { ...entry, lifecycle } });
+        adoptResolve();
+      } catch (error) { send({ action: "failed", error: error.message }); cancel(); }
+    }
   });
+  const startupTimer = setTimeout(cancel, START_TIMEOUT_MS);
+  try {
+    if (!process.connected) throw new Error("Daemon requires private launch IPC");
+    const launch = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => done(new Error("Missing launch handshake")), 500);
+      const disconnected = () => done(new Error("Launcher disconnected"));
+      function done(error, message) {
+        clearTimeout(timer); process.off("message", receive); process.off("disconnect", disconnected);
+        if (error) reject(error); else resolve(message);
+      }
+      function receive(message) {
+        if (message?.action === "launch" && /^[a-f0-9]{32}$/.test(message.launchId)) done(null, message);
+      }
+      process.on("message", receive); process.once("disconnect", disconnected);
+    });
+    launchId = launch.launchId;
+    launchIntent = launch.intent || {};
+    ensureIpcDir(); refuseLegacyDaemon();
+    const duplicateError = () => new Error("Preceding CC generation observed; retry start explicitly after it stops or finishes startup");
+    if (launchIntent.generation) throw duplicateError();
+    claim = await core.acquireOwnership(OWNER_RESOURCE, {
+      timeoutMs: START_TIMEOUT_MS,
+      checkCancelled: checkDeadline,
+      onPredecessor: other => {
+        const generation = `cc1:${other.id}`;
+        if (generation === launchIntent.restartGeneration) return;
+        launchIntent.generation ||= generation;
+        // Throw withdraws our unique claim before any asynchronous verification.
+        throw duplicateError();
+      },
+    });
+    checkDeadline();
+    lifecycle = "starting";
+    const generation = `cc1:${claim.id}`;
+    const socketPath = path.join(IPC_DIR, `cg-${crypto.createHash("sha256").update(generation).digest("hex").slice(0, 24)}.sock`);
+    core.assertSocketPathLength(socketPath);
+    entry = { pid: process.pid, name, cwd, socketPath, generation, ccProtocol: CONTROL_PROTOCOL, lifecycle: "prepared",
+      startedAt: Date.now(), readerKey: READER_KEY, lastHeartbeatAt: Date.now(),
+      ...(process.env.SUPACODE_TAB_ID && { supacodeTabId: process.env.SUPACODE_TAB_ID, supacodeWorktreeId: process.env.SUPACODE_WORKTREE_ID, supacodeSurfaceId: process.env.SUPACODE_SURFACE_ID }),
+    };
+    secureWrite(path.join(claim.path, "generation.json"), JSON.stringify(entry));
+    server = net.createServer(socket => {
+      if (lifecycle === "stopping") { socket.destroy(); return; }
+      core.attachBoundedSocket(socket, sockets, line => {
+        try { checkDeadline(); } catch { cancel(); socket.destroy(); return; }
+        try {
+            const parsed = JSON.parse(line);
+            if (parsed.ccProtocol !== undefined) {
+              const valid = parsed.ccProtocol === CONTROL_PROTOCOL && parsed.generation === generation &&
+                typeof parsed.requestId === "string" && /^[a-f0-9]{32}$/.test(parsed.requestId) && ["status", "stop"].includes(parsed.action);
+              if (!valid) { socket.destroy(); return; }
+              writeSocketResponse(socket, { ccProtocol: CONTROL_PROTOCOL, generation, requestId: parsed.requestId, cwd, socketPath, ok: true,
+                lifecycle: parsed.action === "stop" ? "stopping" : lifecycle });
+              if (parsed.action === "stop") { cancelled = true; void cleanup(); }
+              return;
+            }
+            if (lifecycle !== "adopted") return;
+            const validation = core.validateBridgeMessage(parsed);
+            if (!validation.ok) return;
+            const msg = validation.value;
+            if (msg.type === "message") {
+              let noticeWarning;
+              try {
+                const recording = acceptMessage(msg, recorded => {
+                  if (recorded?.duplicate) {
+                    try { appendDuplicateToMailbox(msg, recorded); }
+                    catch (error) { noticeWarning = `Duplicate already accepted; notice omitted: ${core.sanitizeMetadata(error.message, 300)}`; }
+                  } else appendToMailbox(msg);
+                });
+                writeSocketResponse(socket, socketResponse("ack", msg, { ...journalReceiptMetadata(recording), ...(noticeWarning ? { warning: noticeWarning, noticeOmitted: true } : {}) }));
+              } catch (error) {
+                writeSocketResponse(socket, socketResponse("ack", msg, { ok: false, code: error.code === "MAILBOX_FULL" ? error.code : "DELIVERY_REJECTED", error: core.sanitizeMetadata(error.message, 300) + "; sender must retry after manual repair/drain" }));
+              }
+            } else if (msg.type === "ping") writeSocketResponse(socket, socketResponse("pong", msg));
+        } catch { /* Malformed frames are not acknowledged. */ }
+      });
+    });
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => { socketBound = true; server.off("error", reject); resolve(); });
+    });
+    server.on("error", error => { process.stderr.write(`${error.message}\n`); void cleanup(); });
+    checkDeadline();
+    core.chmodSafe(socketPath, 0o600);
+    core.registerSession(entry, REGISTRY_FILE);
+    core.updateSessionStatus({ pid: process.pid, name, cwd, readerKey: READER_KEY, status: "idle" });
+    checkDeadline(); lifecycle = "prepared"; startupInFlight = false;
+    send({ action: "prepared", entry });
+    // Cancellation also resolves this wait through disconnect, avoiding retained IPC.
+    await Promise.race([adoption, new Promise(resolve => process.once("disconnect", resolve))]);
+    if (!adopted || lifecycle !== "adopted") return;
+    clearTimeout(startupTimer);
+    function touchHeartbeat() {
+      if (lifecycle !== "adopted") return;
+      try {
+        if (!core.updateRegisteredSession(process.pid, { lastHeartbeatAt: Date.now(), readerKey: READER_KEY }, REGISTRY_FILE, generation)) { void cleanup(); return; }
+        core.updateSessionStatus({ pid: process.pid, name, cwd, readerKey: READER_KEY });
+      } catch { void cleanup(); }
+    }
+    heartbeatTimer = setInterval(touchHeartbeat, 30_000);
+    heartbeatTimer.unref();
+  } catch (error) {
+    if (launchIntent?.generation && !claim) {
+      try { checkDeadline(); incumbentFound = await adoptedIncumbent(launchIntent); checkDeadline(); }
+      catch { incumbentFound = null; }
+    }
+    if (incumbentFound && process.connected) {
+      send({ action: "incumbent", entry: incumbentFound });
+      await new Promise(resolve => {
+        const timer = setTimeout(resolve, 800);
+        process.once("disconnect", () => { clearTimeout(timer); resolve(); });
+      });
+    } else { send({ action: "failed", error: error.message }); process.exitCode = 1; }
+    await cleanup();
+  } finally { clearTimeout(startupTimer); }
 }
 
-// ─── Start (daemonize) ───────────────────────────────────────────────────────
-
-function cmdStart() {
-  if (daemonRunning()) {
-    console.log(`pi-cc-bridge already running for: ${cwd}  (pid:${readPid()})`);
-    return;
-  }
-
-  if (process.env.__PI_CC_BRIDGE_DAEMON === "1") {
-    runDaemon();
-    return;
-  }
-
-  ensureIpcDir();
+async function cmdStart() {
+  ensureIpcDir(); refuseLegacyDaemon();
+  const intent = {};
+  const incumbent = await adoptedIncumbent(intent);
+  if (incumbent) { console.log(`pi-cc-bridge already running for: ${cwd} (pid:${incumbent.pid})`); return; }
   const logFile = path.join(IPC_DIR, `cc-${cwdHash}.log`);
   const out = core.openSecureFile(logFile, "append");
-  core.chmodSafe(logFile, 0o600);
-
-  const child = spawn(process.execPath, [__filename, "start"], {
-    cwd,
-    env: { ...process.env, __PI_CC_BRIDGE_DAEMON: "1" },
-    detached: true,
-    stdio: ["ignore", out, out],
-  });
-  child.unref();
-
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline) {
-    const pid = readPid();
-    if (pid && core.isProcessAlive(pid)) {
-      console.log(`✓ pi-cc-bridge started  pid:${pid}  cwd:${cwd}`);
-      console.log(`  Mailbox: ${MAILBOX_FILE}`);
-      console.log(`  Others can reach you as: "${name}"`);
-      return;
+  let child;
+  try {
+    child = spawn(process.execPath, [__filename, "start"], {
+      cwd, env: { ...process.env, __PI_CC_BRIDGE_DAEMON: "1" }, detached: true,
+      stdio: ["ignore", out, out, "ipc"],
+    });
+  } finally { fs.closeSync(out); }
+  const launchId = crypto.randomBytes(16).toString("hex");
+  const deadline = performance.now() + START_TIMEOUT_MS;
+  const result = await new Promise((resolve, reject) => {
+    let settled = false, verifying = false, verifiedGeneration;
+    const timer = setTimeout(() => finish(new Error("Startup timed out; cancellation pending")), START_TIMEOUT_MS);
+    function finish(error, entry, existing = false) {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      if (error && child.connected) child.send({ action: "abort", launchId }, () => {});
+      if (child.connected) child.disconnect();
+      child.unref();
+      if (error) reject(error); else resolve({ entry, existing });
     }
-    const until = Date.now() + 50;
-    while (Date.now() < until) {}
+    child.on("error", error => finish(error));
+    child.on("exit", (code, signal) => finish(new Error(`CC startup exited (${code ?? signal}); see ${logFile}`)));
+    child.on("disconnect", () => finish(new Error("CC startup disconnected; cancellation pending")));
+    child.on("message", async message => {
+      if (settled || message?.launchId !== launchId) return;
+      if (message.action === "failed") { finish(new Error(message.error)); return; }
+      try {
+        if (message.action === "prepared" || message.action === "incumbent") {
+          if (verifying) return;
+          verifying = true;
+          const entry = validateGeneration(message.entry);
+          const response = await control(entry, "status");
+          const expected = message.action === "incumbent" ? "adopted" : "prepared";
+          const registered = registryGeneration(entry.generation);
+          if (response.lifecycle !== expected || registered?.socketPath !== entry.socketPath || registered?.lifecycle !== expected) throw new Error("CC readiness/registry mismatch");
+          if (settled) return;
+          if (performance.now() >= deadline) throw new Error("Startup deadline expired; cancellation pending");
+          verifiedGeneration = entry.generation;
+          if (expected === "adopted") finish(null, entry, true);
+          else child.send({ action: "adopt", generation: entry.generation, launchId }, error => { if (error) finish(error); });
+        } else if (message.action === "adopted") {
+          const entry = validateGeneration(message.entry);
+          if (performance.now() >= deadline) throw new Error("Startup deadline expired; cancellation pending");
+          if (!verifying || entry.generation !== verifiedGeneration || registryGeneration(entry.generation)?.lifecycle !== "adopted") throw new Error("CC adoption mismatch");
+          finish(null, entry);
+        }
+      } catch (error) { finish(error); }
+    });
+    child.send({ action: "launch", launchId, intent }, error => { if (error) finish(error); });
+  });
+  console.log(result.existing ? `pi-cc-bridge already running for: ${cwd} (pid:${result.entry.pid})` : `✓ pi-cc-bridge started  pid:${result.entry.pid}  cwd:${cwd}`);
+  if (!result.existing) {
+    console.log(`  Mailbox: ${MAILBOX_FILE}`);
+    console.log(`  Others can reach you as: "${name}"`);
   }
-
-  console.log(`pi-cc-bridge started (pid:${child.pid}) — check ${logFile} if issues arise`);
 }
 
-// ─── Main ────────────────────────────────────────────────────────────────────
-
-if (process.env.__PI_CC_BRIDGE_DAEMON === "1") {
-  runDaemon();
-} else {
-  const cmd = process.argv[2] || "start";
-  switch (cmd) {
-    case "start": cmdStart(); break;
-    case "status": cmdStatus(); break;
-    case "mailbox": cmdMailbox(); break;
-    case "inbox": cmdInbox(process.argv.slice(3)); break;
-    case "state": cmdState(process.argv.slice(3)); break;
-    case "stop": cmdStop(); break;
-    default:
-      die(`Unknown command: ${cmd}\nUsage: pi-cc-bridge [start|status|mailbox|inbox|state|stop]`);
+async function main() {
+  const parsed = parseCcCommand(process.argv.slice(2));
+  if (process.env.__PI_CC_BRIDGE_DAEMON === "1") return runDaemon();
+  switch (parsed.command) {
+    case "start": return cmdStart();
+    case "status": return cmdStatus();
+    case "mailbox": return cmdMailbox();
+    case "inbox": return cmdInbox(parsed);
+    case "state": return cmdState(parsed.positionals);
+    case "stop": return cmdStop();
+    default: throw new Error("Usage: pi-cc-bridge [start|status|mailbox|inbox|state|stop]");
   }
 }
+main().catch(error => {
+  process.stderr.write(core.terminalSafeText(error.message) + "\n");
+  process.exitCode = 1;
+  // Awaited inbox/mailbox transactions have released ownership. Node stdio can
+  // retain pending OS writes even after destroy/unref; never wait forever here.
+  if (error.outputHandoffFailed && process.env.__PI_CC_BRIDGE_DAEMON !== "1" && ["inbox", "mailbox"].includes(process.argv[2])) process.exit(1);
+});

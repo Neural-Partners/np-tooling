@@ -406,7 +406,7 @@ export default function (pi: ExtensionAPI) {
 		const nextLimit = policy?.rateLimit?.perSenderPer10s ?? bridgeCore.DEFAULT_BRIDGE_POLICY.rateLimit.perSenderPer10s;
 		if (nextLimit !== rateLimitSize) {
 			rateLimitSize = nextLimit;
-			senderRateLimiter = bridgeCore.createSenderRateLimiter({ limit: rateLimitSize, windowMs: 10_000 });
+			senderRateLimiter.setLimit(rateLimitSize);
 		}
 		return senderRateLimiter.check(String(msg.fromPid));
 	}
@@ -427,7 +427,7 @@ export default function (pi: ExtensionAPI) {
 			replyLine,
 			``,
 		].join("\n");
-		bridgeCore.appendFileSecure(myMailboxFile, entry);
+		bridgeCore.appendMailbox(myMailboxFile, entry);
 	}
 
 	// Handle an incoming message from another session
@@ -501,46 +501,24 @@ export default function (pi: ExtensionAPI) {
 
 		// Start the socket server
 		server = net.createServer((socket) => {
-			sockets.add(socket);
-			socket.on("close", () => sockets.delete(socket));
-			socket.setEncoding("utf8");
-			let buffer = "";
-
-			socket.on("data", (chunk) => {
-				const collected = bridgeCore.collectJsonLines(buffer, chunk);
-				if (collected.overflow) {
-					socket.destroy();
-					return;
-				}
-				buffer = collected.buffer;
-
-				for (const line of collected.lines) {
-					const trimmed = line.trim();
-					if (!trimmed) continue;
+			bridgeCore.attachBoundedSocket(socket, sockets, (line: string) => {
+				try {
+					const validation = bridgeCore.validateBridgeMessage(JSON.parse(line));
+					if (!validation.ok) return;
+					const msg = validation.value as BridgeMessage;
+					const ctx = currentCtx;
+					if (!ctx) return;
+					let metadata: any = {};
 					try {
-						const parsed = JSON.parse(trimmed);
-						const validation = bridgeCore.validateBridgeMessage(parsed);
-						if (!validation.ok) continue;
-						const msg = validation.value as BridgeMessage;
-						const ctx = currentCtx;
-						if (ctx && (msg.type === "message" || msg.type === "ping")) {
-							const recording = handleIncoming(msg, ctx);
-							const responseType = msg.type === "ping" ? "pong" : "ack";
-							const response = bridgeCore.createSocketResponse(responseType, msg, {
-								fromPid: myPid,
-								fromName: myName,
-								fromCwd: ctx.cwd,
-							}, recording ? journalReceiptMetadata(recording) : {});
-							socket.write(JSON.stringify(response) + "\n", "utf-8");
-						}
-					} catch {
-						// Malformed message - ignore
+						const recording = handleIncoming(msg, ctx);
+						if (recording) metadata = journalReceiptMetadata(recording);
+					} catch (error: any) {
+						metadata = { ok: false, code: error.code === "MAILBOX_FULL" ? error.code : "DELIVERY_REJECTED", error: safeText(error.message, 300) + "; sender must retry after manual repair/drain" };
 					}
-				}
-			});
-
-			socket.on("error", () => {
-				// Ignore socket errors from individual connections
+					bridgeCore.writeSocketResponseBounded(socket, bridgeCore.createSocketResponse(msg.type === "ping" ? "pong" : "ack", msg, {
+						fromPid: myPid, fromName: myName, fromCwd: ctx.cwd,
+					}, metadata));
+				} catch { /* Malformed frames are not acknowledged. */ }
 			});
 		});
 
@@ -679,8 +657,12 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			logToolUsage(ctx, "slash_command", "bridge-mailbox");
 			try {
-				const content = bridgeCore.readAndClearFileAtomic(myMailboxFile).trim();
-				ctx.ui.notify(bridgeCore.formatMailboxNotice(content), "info");
+				if (!ctx.hasUI) throw new Error("Mailbox review requires TUI or RPC notifications; mailbox retained");
+				const overflow = bridgeCore.mailboxOverflowStatus(myMailboxFile);
+				if (overflow) ctx.ui.notify(overflow, "warning");
+				await bridgeCore.consumeMailbox(myMailboxFile, (content: string) => {
+					ctx.ui.notify(bridgeCore.formatMailboxNotice(content.trim()), "info");
+				});
 			} catch (err) {
 				notifyCommand(ctx, `Failed to read bridge mailbox: ${err}`, "error", "Fix the mailbox error, then run /bridge-mailbox again.");
 			}
